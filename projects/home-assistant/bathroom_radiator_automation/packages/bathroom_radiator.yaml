@@ -1,0 +1,1236 @@
+# =============================================================================
+# Bathroom Radiator Package - shower detection + towel warming/drying
+# =============================================================================
+# Requires Home Assistant 2024.10+ (modern triggers/conditions/actions syntax).
+#
+# Entity IDs assumed (adjust here if yours differ):
+#   climate.badkamer_radiator                 Lavigo Eros via Tuya
+#   sensor.ewelink_snzb_02p_humidity          SONOFF SNZB-02P relative humidity
+#   sensor.ewelink_snzb_02p_temperature       SONOFF SNZB-02P temperature
+#   sensor.ewelink_snzb_02p_battery           SONOFF SNZB-02P battery %
+#   sensor.shellyemg3_e4b32335e63c_energy_meter_0_power
+#                                             Shelly EM Gen3 channel clamped on
+#                                             the radiator/oven group, in W
+#
+# INSTALL
+#   1. Copy this file to /config/packages/bathroom_radiator.yaml
+#   2. Ensure configuration.yaml contains:
+#        homeassistant:
+#          packages: !include_dir_named packages
+#   3. Disable (do not delete) the old time-based radiator automation so the
+#      two do not fight over the same climate entity. Re-enable it in winter
+#      if the bathroom needs a baseline temperature.
+#   4. Restart Home Assistant.
+#
+# DETECTION STRATEGY
+# An absolute humidity threshold is not robust: the trip point depends on the
+# season, the outdoor weather, the shower temperature and - most of all - the
+# efficiency of the mechanical ventilation. Replacing the ventilation unit
+# would invalidate any fixed threshold.
+#
+# So the shower is detected from TWO signals that are both relative:
+#
+#   1. RATE   - how fast humidity is climbing right now (%/min, 10-min window).
+#               A shower produces a steep, sustained ramp. Opening a window,
+#               the weather changing or drying towels produce a slow drift.
+#   2. RISE   - how far humidity sits above its own rolling 3-hour minimum.
+#               This baseline follows the room, so if the new ventilation unit
+#               drops the resting level from 70% to 50%, the detector adapts
+#               on its own without any retuning.
+#
+# Both must be satisfied. A short absolute floor is kept as a third guard, but
+# deliberately set low so it never becomes the limiting factor.
+#
+# GROUP OVERLOAD PROTECTION - READ THIS
+# The radiator (1000 W) shares a 16 A group with the oven. Together they can
+# exceed the 3680 W the breaker allows, so heating is suspended while the group
+# is loaded and resumed afterwards, keeping the remaining phase time.
+#
+# The load comes from a Shelly EM Gen3 clamp on that group, so it is a real
+# group measurement that INCLUDES the radiator itself:
+#   overload  group load above the limit -> radiator off
+#   headroom  load with the radiator off, plus its own draw, fits under the
+#             limit -> radiator back on
+# The radiator's draw is the hysteresis between the two. The limit is set just
+# under the 3680 W fuse rating (default 3500 W).
+#
+# If the Shelly stops reporting, the guard fails closed: the radiator is
+# switched off at once, held off until the meter returns, and the dashboard
+# shows a warning.
+#
+# COMMAND VERIFICATION
+# Tuya commands are occasionally lost without any error - seen on the warming
+# to drying change. Every radiator command therefore goes through
+# script.bathroom_radiator_set, which records the desired mode and setpoint and
+# sends them. A monitor compares what the radiator reports against that and
+# re-sends until they match, up to a retry limit, then raises a notification.
+# Once confirmed it stops watching, so manual changes outside a session are
+# never fought.
+#
+# FIRST RUN
+# These helpers deliberately carry no 'initial:' value, because that would
+# overwrite your tuning on every restart. On first creation they therefore sit
+# at their minimum. Set them once on the dashboard to these starting points:
+#
+#   Rate Threshold ............ 0.4  %/min   (measured shower ramp is ~0.8-1.0)
+#   Rise Above Baseline ....... 5    %
+#   Minimum Humidity Floor .... 70   %       (lower to ~60 after a ventilation
+#                                             upgrade, or if showers are missed)
+#   Cooldown .................. 90   min
+#   Warming Temperature ....... 24   °C
+#   Warming Duration .......... 30   min
+#   Drying Temperature ........ 22   °C
+#   Drying Duration ........... 30   min
+#   Battery Alert Level ....... 20   %
+#   Radiator Power ............ 1000 W       (Lavigo Eros Round 1800x600)
+#   Group Power Limit ........  3500 W       (fuse rating is 3680 W)
+#   Power Trip Delay .........  5    s
+#   Power Restart Hold-off ...  60   s       (raise if the oven makes the
+#                                             radiator cycle on and off)
+#   Phase Restart Threshold ..  10   min     (longer holds rerun the phase)
+#   Power Hold Timeout .......  90   min
+#   Command Retry Interval ...  30   s
+#   Command Max Retries ......  5
+#   Automation Enabled ........ on
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+input_boolean:
+  bathroom_shower_automation:
+    name: Bathroom Shower Automation Enabled
+    icon: mdi:shower-head
+
+  bathroom_shower_session:
+    name: Bathroom Shower Session Active
+    icon: mdi:shower
+
+  bathroom_power_hold:
+    name: Bathroom Radiator Power Hold
+    icon: mdi:flash-off
+
+  # On from sending a command until the radiator reports it applied.
+  bathroom_radiator_command_pending:
+    name: Bathroom Radiator Command Pending
+    icon: mdi:send-clock
+
+# What the automation wants the radiator to be doing, as opposed to what it reports.
+input_select:
+  bathroom_radiator_desired_mode:
+    name: Bathroom Radiator Desired Mode
+    icon: mdi:radiator
+    options:
+      - "heat"
+      - "off"
+
+counter:
+  bathroom_radiator_command_retries:
+    name: Bathroom Radiator Command Retries
+    icon: mdi:repeat
+    initial: 0
+    step: 1
+    restore: true
+
+input_datetime:
+  bathroom_radiator_last_sent:
+    name: Bathroom Radiator Last Command Sent
+    has_date: true
+    has_time: true
+    icon: mdi:send-clock
+
+  # Survives restarts, unlike a timer's last_changed. Used for the cooldown so
+  # a long shower or a second rinse cannot start a fresh heating cycle.
+  bathroom_shower_detected:
+    name: Bathroom Shower Last Detected
+    has_date: true
+    has_time: true
+    icon: mdi:clock-alert-outline
+
+  bathroom_power_hold_started:
+    name: Bathroom Power Hold Started
+    has_date: true
+    has_time: true
+    icon: mdi:flash-off
+
+input_number:
+  # --- detection tuning ---
+  bathroom_shower_rate_threshold:
+    name: Bathroom Shower Rate Threshold
+    min: 0.1
+    max: 3
+    step: 0.05
+    unit_of_measurement: "%/min"
+    mode: box
+    icon: mdi:chart-line-variant
+
+  bathroom_shower_rise_above_baseline:
+    name: Bathroom Shower Rise Above Baseline
+    min: 1
+    max: 25
+    step: 0.5
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:arrow-expand-up
+
+  bathroom_shower_min_humidity:
+    name: Bathroom Shower Minimum Humidity
+    min: 40
+    max: 95
+    step: 1
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:water-percent
+
+  bathroom_shower_cooldown_minutes:
+    name: Bathroom Shower Cooldown
+    min: 0
+    max: 240
+    step: 5
+    unit_of_measurement: "min"
+    mode: box
+    icon: mdi:timer-lock-outline
+
+  # --- phase 1: warm the towels while showering ---
+  bathroom_boost_temperature:
+    name: Bathroom Boost Temperature
+    min: 7
+    max: 30
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+    icon: mdi:fire
+
+  bathroom_boost_minutes:
+    name: Bathroom Boost Duration
+    min: 5
+    max: 180
+    step: 5
+    unit_of_measurement: "min"
+    mode: box
+    icon: mdi:timer-outline
+
+  # --- phase 2: dry the towels at lower cost ---
+  bathroom_dry_temperature:
+    name: Bathroom Dry Temperature
+    min: 7
+    max: 30
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+    icon: mdi:tumble-dryer
+
+  bathroom_dry_minutes:
+    name: Bathroom Dry Duration
+    min: 0
+    max: 240
+    step: 5
+    unit_of_measurement: "min"
+    mode: box
+    icon: mdi:timer-sand
+
+  # --- maintenance ---
+  bathroom_battery_alert_level:
+    name: Bathroom Sensor Battery Alert Level
+    min: 5
+    max: 50
+    step: 5
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:battery-alert
+
+  # --- group overload protection ---
+  # Nameplate draw of the Lavigo Eros Round 1800x600 is 1000 W (~4.3 A at 230 V).
+  bathroom_radiator_power:
+    name: Bathroom Radiator Power
+    min: 200
+    max: 3000
+    step: 50
+    unit_of_measurement: "W"
+    mode: box
+    icon: mdi:radiator
+
+  # Measured group load, radiator included, above which the radiator goes off.
+  bathroom_group_power_limit:
+    name: Bathroom Group Power Limit
+    min: 1000
+    max: 4000
+    step: 100
+    unit_of_measurement: "W"
+    mode: box
+    icon: mdi:flash-alert
+
+  bathroom_power_trip_seconds:
+    name: Bathroom Power Trip Delay
+    min: 1
+    max: 15
+    step: 1
+    unit_of_measurement: "s"
+    mode: box
+    icon: mdi:timer-alert-outline
+
+  # Sustained headroom required before heating restarts. Ovens and dishwashers
+  # modulate in bursts, so resuming on the first quiet second would make the
+  # radiator chatter along with them.
+  bathroom_power_recovery_seconds:
+    name: Bathroom Power Restart Hold-off
+    min: 10
+    max: 1800
+    step: 10
+    unit_of_measurement: "s"
+    mode: box
+    icon: mdi:timer-refresh-outline
+
+  # A brief interruption can resume mid-phase because the radiator is still
+  # warm. Past this point it has cooled, so the phase runs again in full.
+  bathroom_power_restart_threshold_minutes:
+    name: Bathroom Phase Restart Threshold
+    min: 1
+    max: 120
+    step: 1
+    unit_of_measurement: "min"
+    mode: box
+    icon: mdi:restart
+
+  bathroom_power_hold_timeout_minutes:
+    name: Bathroom Power Hold Timeout
+    min: 5
+    max: 480
+    step: 5
+    unit_of_measurement: "min"
+    mode: box
+    icon: mdi:timer-off-outline
+
+  # --- command verification ---
+  # Written by script.bathroom_radiator_set, not meant to be edited by hand.
+  bathroom_radiator_desired_temperature:
+    name: Bathroom Radiator Desired Temperature
+    min: 5
+    max: 35
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+    icon: mdi:thermometer-check
+
+  # Above the 10 s manual-override delay, so a hand switch-off is recognised
+  # before the monitor could re-send heat.
+  bathroom_radiator_retry_seconds:
+    name: Bathroom Radiator Command Retry Interval
+    min: 15
+    max: 300
+    step: 5
+    unit_of_measurement: "s"
+    mode: box
+    icon: mdi:timer-refresh-outline
+
+  bathroom_radiator_max_retries:
+    name: Bathroom Radiator Command Max Retries
+    min: 1
+    max: 20
+    step: 1
+    mode: box
+    icon: mdi:repeat
+
+# Timers rather than delays: a delay is lost on restart and cannot be shown as
+# a countdown, while a restored timer keeps the session intact across reloads.
+timer:
+  bathroom_shower_boost:
+    name: Bathroom Boost Phase
+    icon: mdi:fire
+    duration: "00:30:00"
+    restore: true
+
+  bathroom_shower_dry:
+    name: Bathroom Dry Phase
+    icon: mdi:tumble-dryer
+    duration: "00:30:00"
+    restore: true
+
+# -----------------------------------------------------------------------------
+# Derived sensors
+# -----------------------------------------------------------------------------
+sensor:
+  # Rate of change in %/min. The 10-minute window smooths the coarse 1% steps
+  # the SNZB-02P reports, which would otherwise alternate between a huge spike
+  # and zero on every single update.
+  - platform: derivative
+    source: sensor.ewelink_snzb_02p_humidity
+    name: Bathroom Humidity Rate
+    unique_id: bathroom_humidity_rate
+    unit_time: min
+    time_window: "00:10:00"
+    round: 2
+
+  # Rolling floor of the room. 3 hours is long enough that a full shower peak
+  # never pulls the baseline up with it, and short enough to track the season.
+  - platform: statistics
+    name: Bathroom Humidity Baseline
+    unique_id: bathroom_humidity_baseline
+    entity_id: sensor.ewelink_snzb_02p_humidity
+    state_characteristic: value_min
+    max_age:
+      hours: 3
+    sampling_size: 500
+
+# -----------------------------------------------------------------------------
+# Template sensors
+# -----------------------------------------------------------------------------
+template:
+  - sensor:
+      # Every power automation reads only this sensor.
+      - name: Bathroom Group Power
+        unique_id: bathroom_group_power
+        unit_of_measurement: "W"
+        device_class: power
+        state_class: measurement
+        icon: mdi:flash
+        availability: >
+          {{ states('sensor.shellyemg3_e4b32335e63c_energy_meter_0_power') | is_number }}
+        state: >
+          {% set src = 'sensor.shellyemg3_e4b32335e63c_energy_meter_0_power' %}
+          {% set unit = state_attr(src, 'unit_of_measurement') | string %}
+          {# abs: a clamp fitted the wrong way round reads negative. #}
+          {{ (states(src) | float(0) * (1000 if unit in ['kW', 'kw'] else 1))
+             | abs | round(0) }}
+
+      - name: Bathroom Humidity Above Baseline
+        unique_id: bathroom_humidity_above_baseline
+        unit_of_measurement: "%"
+        icon: mdi:arrow-expand-up
+        availability: >
+          {{ states('sensor.ewelink_snzb_02p_humidity') | is_number
+             and states('sensor.bathroom_humidity_baseline') | is_number }}
+        state: >
+          {{ (states('sensor.ewelink_snzb_02p_humidity') | float
+              - states('sensor.bathroom_humidity_baseline') | float) | round(1) }}
+
+      - name: Bathroom Shower Phase
+        unique_id: bathroom_shower_phase
+        icon: mdi:shower-head
+        state: >
+          {% if is_state('input_boolean.bathroom_power_hold', 'on') %}
+            Paused - power
+          {% elif is_state('timer.bathroom_shower_boost', 'active') %}
+            Warming
+          {% elif is_state('timer.bathroom_shower_dry', 'active') %}
+            Drying
+          {% elif is_state('input_boolean.bathroom_shower_automation', 'off') %}
+            Disabled
+          {% else %}
+            Idle
+          {% endif %}
+
+      - name: Bathroom Shower Phase Ends
+        unique_id: bathroom_shower_phase_ends
+        device_class: timestamp
+        icon: mdi:clock-end
+        availability: >
+          {{ is_state('timer.bathroom_shower_boost', 'active')
+             or is_state('timer.bathroom_shower_dry', 'active') }}
+        state: >
+          {% if is_state('timer.bathroom_shower_boost', 'active') %}
+            {{ state_attr('timer.bathroom_shower_boost', 'finishes_at') }}
+          {% else %}
+            {{ state_attr('timer.bathroom_shower_dry', 'finishes_at') }}
+          {% endif %}
+
+      # Blocks a re-trigger while the humidity is still high from the shower
+      # that is already being handled.
+      - name: Bathroom Shower Cooldown Remaining
+        unique_id: bathroom_shower_cooldown_remaining
+        unit_of_measurement: "min"
+        icon: mdi:timer-lock-outline
+        state: >
+          {% set ts = state_attr('input_datetime.bathroom_shower_detected', 'timestamp') | float(0) %}
+          {% set cooldown = states('input_number.bathroom_shower_cooldown_minutes') | float(90) %}
+          {% if ts == 0 %}
+            0
+          {% else %}
+            {{ [0, (cooldown - (now().timestamp() - ts) / 60)] | max | round(0) }}
+          {% endif %}
+
+      # Shows how long the current hold has lasted, so the restart threshold
+      # can be set against what really happens when the oven runs.
+      - name: Bathroom Power Hold Duration
+        unique_id: bathroom_power_hold_duration
+        unit_of_measurement: "min"
+        icon: mdi:timer-sand-paused
+        state: >
+          {% if is_state('input_boolean.bathroom_power_hold', 'on') %}
+            {# Unset reads as 1970 in local time, so its timestamp is a small
+               negative number, not 0. Before 2000 means never set. #}
+            {% set ts = state_attr('input_datetime.bathroom_power_hold_started', 'timestamp') | float(0) %}
+            {{ 0 if ts < 946684800 else ((now().timestamp() - ts) / 60) | round(1) }}
+          {% else %}
+            0
+          {% endif %}
+
+  - binary_sensor:
+      # Radiator must go off now. A silent meter counts as overload.
+      - name: Bathroom Power Overload
+        unique_id: bathroom_power_overload
+        device_class: problem
+        icon: mdi:flash-alert
+        state: >
+          {% set p = states('sensor.bathroom_group_power') %}
+          {{ not (p | is_number)
+             or p | float > states('input_number.bathroom_group_power_limit') | float(3500) }}
+
+      # Room for the radiator's full draw on top of what is already running.
+      # Only meaningful while the radiator is off, which is the only time it
+      # is consulted - the gap between this and the overload threshold is the
+      # hysteresis that stops the radiator chattering on and off.
+      - name: Bathroom Power Headroom
+        unique_id: bathroom_power_headroom
+        icon: mdi:flash-outline
+        state: >
+          {% set p = states('sensor.bathroom_group_power') %}
+          {{ p | is_number
+             and (p | float + states('input_number.bathroom_radiator_power') | float(1000))
+                 <= states('input_number.bathroom_group_power_limit') | float(3500) }}
+
+      # Radiator reports the mode and setpoint it was last told to use.
+      - name: Bathroom Radiator In Sync
+        unique_id: bathroom_radiator_in_sync
+        icon: mdi:check-network-outline
+        state: >
+          {% set r = 'climate.badkamer_radiator' %}
+          {% if is_state('input_select.bathroom_radiator_desired_mode', 'off') %}
+            {{ is_state(r, 'off') }}
+          {% else %}
+            {% set want = states('input_number.bathroom_radiator_desired_temperature') | float(0) %}
+            {% set have = state_attr(r, 'temperature') | float(-100) %}
+            {{ is_state(r, 'heat') and (have - want) | abs < 0.25 }}
+          {% endif %}
+
+# -----------------------------------------------------------------------------
+# Scripts
+# -----------------------------------------------------------------------------
+script:
+  # The only way the automation talks to the radiator. Records the desired
+  # state so the command monitor can verify and re-send it.
+  bathroom_radiator_set:
+    alias: "Bathroom: Set Radiator (verified)"
+    icon: mdi:radiator
+    mode: queued
+    max: 10
+    fields:
+      hvac_mode:
+        description: heat or off
+        required: true
+        selector:
+          select:
+            options:
+              - "heat"
+              - "off"
+      temperature:
+        description: Setpoint in °C, used with heat. Omit to keep the previous one.
+        selector:
+          number:
+            min: 5
+            max: 35
+            step: 0.5
+    sequence:
+      # Down while the desired state is rewritten, so the monitor cannot confirm
+      # a half-written mix of old and new values.
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.bathroom_radiator_command_pending
+      - if:
+          - condition: template
+            value_template: "{{ hvac_mode == 'heat' and temperature is defined }}"
+        then:
+          - action: input_number.set_value
+            target:
+              entity_id: input_number.bathroom_radiator_desired_temperature
+            data:
+              value: "{{ temperature | float }}"
+      - action: input_select.select_option
+        target:
+          entity_id: input_select.bathroom_radiator_desired_mode
+        data:
+          option: "{{ hvac_mode }}"
+      - action: counter.reset
+        target:
+          entity_id: counter.bathroom_radiator_command_retries
+      - action: script.bathroom_radiator_send
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.bathroom_radiator_command_pending
+
+  # Sends whatever the desired-state helpers hold. Used for the first attempt
+  # and for every retry.
+  bathroom_radiator_send:
+    alias: "Bathroom: Send Radiator Command"
+    icon: mdi:send
+    mode: queued
+    max: 10
+    sequence:
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.bathroom_radiator_last_sent
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+      - if:
+          - condition: state
+            entity_id: input_select.bathroom_radiator_desired_mode
+            state: "off"
+        then:
+          # A cloud error must not abort the script; the monitor retries.
+          - action: climate.set_hvac_mode
+            continue_on_error: true
+            target:
+              entity_id: climate.badkamer_radiator
+            data:
+              hvac_mode: "off"
+        else:
+          - if:
+              - condition: not
+                conditions:
+                  - condition: state
+                    entity_id: climate.badkamer_radiator
+                    state: heat
+            then:
+              - action: climate.set_hvac_mode
+                continue_on_error: true
+                target:
+                  entity_id: climate.badkamer_radiator
+                data:
+                  hvac_mode: heat
+              # Let the mode change land before the setpoint follows it.
+              - delay: "00:00:02"
+          - action: climate.set_temperature
+            continue_on_error: true
+            target:
+              entity_id: climate.badkamer_radiator
+            data:
+              temperature: "{{ states('input_number.bathroom_radiator_desired_temperature') | float(22) }}"
+
+  # Starts the full two-phase cycle by hand. Use this to test the radiator side
+  # without waiting for a shower, or to warm towels before a bath.
+  # Deliberately does not stamp the cooldown: a manual run must never block the
+  # automatic detection of a real shower a few minutes later.
+  bathroom_shower_boost_now:
+    alias: "Bathroom: Start Boost Now"
+    icon: mdi:fire
+    mode: single
+    sequence:
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.bathroom_shower_session
+      - action: timer.cancel
+        target:
+          entity_id: timer.bathroom_shower_dry
+      - if:
+          - condition: state
+            entity_id: binary_sensor.bathroom_power_headroom
+            state: "on"
+        then:
+          - action: input_boolean.turn_off
+            target:
+              entity_id: input_boolean.bathroom_power_hold
+          - action: script.bathroom_radiator_set
+            data:
+              hvac_mode: heat
+              temperature: "{{ states('input_number.bathroom_boost_temperature') | float(24) }}"
+          - action: timer.start
+            target:
+              entity_id: timer.bathroom_shower_boost
+            data:
+              duration: >
+                {{ (states('input_number.bathroom_boost_minutes') | float(30) * 60)
+                   | int | timestamp_custom('%H:%M:%S', false) }}
+        else:
+          # Session is live but heating waits. Leaving both timers idle tells
+          # the resume script to start the warming phase at its full length.
+          - action: timer.cancel
+            target:
+              entity_id: timer.bathroom_shower_boost
+          - action: input_boolean.turn_on
+            target:
+              entity_id: input_boolean.bathroom_power_hold
+
+  # Pausing rather than cancelling keeps the unused minutes of the current
+  # phase, so an oven cycle mid-shower costs no towel-warming time.
+  bathroom_power_pause:
+    alias: "Bathroom: Pause for Power"
+    icon: mdi:flash-off
+    mode: single
+    sequence:
+      # Flag first: the manual-override automation checks it before deciding
+      # that a human switched the radiator off.
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.bathroom_power_hold
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.bathroom_power_hold_started
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+      - action: timer.pause
+        target:
+          entity_id:
+            - timer.bathroom_shower_boost
+            - timer.bathroom_shower_dry
+      - action: script.bathroom_radiator_set
+        data:
+          hvac_mode: "off"
+
+  bathroom_power_resume:
+    alias: "Bathroom: Resume After Power Hold"
+    icon: mdi:play-pause
+    mode: single
+    sequence:
+      - variables:
+          held_minutes: >
+            {% set ts = state_attr('input_datetime.bathroom_power_hold_started', 'timestamp') | float(0) %}
+            {{ 0 if ts < 946684800 else ((now().timestamp() - ts) / 60) }}
+          # Past the threshold the radiator has gone cold, so resuming the few
+          # remaining minutes would not warm or dry anything.
+          restart_phase: >
+            {% set ts = state_attr('input_datetime.bathroom_power_hold_started', 'timestamp') | float(0) %}
+            {% set held = 0 if ts == 0 else ((now().timestamp() - ts) / 60) %}
+            {{ held >= states('input_number.bathroom_power_restart_threshold_minutes') | float(10) }}
+      - action: input_boolean.turn_off
+        target:
+          entity_id: input_boolean.bathroom_power_hold
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: timer.bathroom_shower_dry
+                state: paused
+            sequence:
+              - action: script.bathroom_radiator_set
+                data:
+                  hvac_mode: heat
+                  temperature: "{{ states('input_number.bathroom_dry_temperature') | float(22) }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ restart_phase }}"
+                then:
+                  - action: timer.start
+                    target:
+                      entity_id: timer.bathroom_shower_dry
+                    data:
+                      duration: >
+                        {{ (states('input_number.bathroom_dry_minutes') | float(30) * 60)
+                           | int | timestamp_custom('%H:%M:%S', false) }}
+                else:
+                  # timer.start on a paused timer resumes its remaining time.
+                  - action: timer.start
+                    target:
+                      entity_id: timer.bathroom_shower_dry
+          - conditions:
+              - condition: state
+                entity_id: timer.bathroom_shower_boost
+                state: paused
+            sequence:
+              - action: script.bathroom_radiator_set
+                data:
+                  hvac_mode: heat
+                  temperature: "{{ states('input_number.bathroom_boost_temperature') | float(24) }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ restart_phase }}"
+                then:
+                  - action: timer.start
+                    target:
+                      entity_id: timer.bathroom_shower_boost
+                    data:
+                      duration: >
+                        {{ (states('input_number.bathroom_boost_minutes') | float(30) * 60)
+                           | int | timestamp_custom('%H:%M:%S', false) }}
+                else:
+                  - action: timer.start
+                    target:
+                      entity_id: timer.bathroom_shower_boost
+        default:
+          # Held from the very start, so no phase has run yet.
+          - action: script.bathroom_radiator_set
+            data:
+              hvac_mode: heat
+              temperature: "{{ states('input_number.bathroom_boost_temperature') | float(24) }}"
+          - action: timer.start
+            target:
+              entity_id: timer.bathroom_shower_boost
+            data:
+              duration: >
+                {{ (states('input_number.bathroom_boost_minutes') | float(30) * 60)
+                   | int | timestamp_custom('%H:%M:%S', false) }}
+
+  bathroom_shower_cancel:
+    alias: "Bathroom: Cancel and Switch Off"
+    icon: mdi:stop-circle
+    mode: single
+    sequence:
+      # Flag down first, so the manual-override automation does not also fire.
+      - action: input_boolean.turn_off
+        target:
+          entity_id:
+            - input_boolean.bathroom_shower_session
+            - input_boolean.bathroom_power_hold
+      - action: timer.cancel
+        target:
+          entity_id:
+            - timer.bathroom_shower_boost
+            - timer.bathroom_shower_dry
+      - action: script.bathroom_radiator_set
+        data:
+          hvac_mode: "off"
+
+  # Clears the cooldown so a detection can happen immediately. Handy while
+  # tuning the thresholds - otherwise every test costs a 90-minute wait.
+  bathroom_shower_reset_cooldown:
+    alias: "Bathroom: Reset Detection Cooldown"
+    icon: mdi:timer-off-outline
+    mode: single
+    sequence:
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.bathroom_shower_detected
+        data:
+          datetime: "1970-01-01 00:00:00"
+
+# -----------------------------------------------------------------------------
+# Automations
+# -----------------------------------------------------------------------------
+automation:
+  # ---------------------------------------------------------------------------
+  # DETECTION
+  # ---------------------------------------------------------------------------
+  - id: bathroom_shower_detected
+    alias: "Bathroom: shower detected, start warming"
+    mode: single
+    max_exceeded: silent
+    triggers:
+      # numeric_state accepts an entity_id as its bound, so the threshold stays
+      # tunable from the dashboard without touching this file.
+      - trigger: numeric_state
+        entity_id: sensor.bathroom_humidity_rate
+        above: input_number.bathroom_shower_rate_threshold
+      - trigger: time_pattern
+        minutes: "/2"
+    conditions:
+      # Re-checking the rate as a condition makes this level-triggered. A bare
+      # numeric_state trigger only fires on the upward crossing, so if any
+      # condition below blocked that one moment - a cooldown about to expire, a
+      # missed sensor report - the rest of the shower would be ignored.
+      - condition: numeric_state
+        entity_id: sensor.bathroom_humidity_rate
+        above: input_number.bathroom_shower_rate_threshold
+      - condition: state
+        entity_id: input_boolean.bathroom_shower_automation
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.bathroom_shower_session
+        state: "off"
+      # Absolute floor - intentionally permissive, see header.
+      - condition: numeric_state
+        entity_id: sensor.ewelink_snzb_02p_humidity
+        above: input_number.bathroom_shower_min_humidity
+      # Self-adapting gate: passes open if the baseline has not populated yet,
+      # which only happens in the first minutes after a restart.
+      - condition: template
+        value_template: >
+          {% set base = states('sensor.bathroom_humidity_baseline') %}
+          {% set cur = states('sensor.ewelink_snzb_02p_humidity') | float(0) %}
+          {% set need = states('input_number.bathroom_shower_rise_above_baseline') | float(5) %}
+          {{ not (base | is_number) or (cur - (base | float)) >= need }}
+      # Cooldown since the previous detection. Falls open when never set.
+      - condition: template
+        value_template: >
+          {% set ts = state_attr('input_datetime.bathroom_shower_detected', 'timestamp') | float(0) %}
+          {% set cooldown = states('input_number.bathroom_shower_cooldown_minutes') | float(90) %}
+          {{ ts == 0 or (now().timestamp() - ts) >= cooldown * 60 }}
+    actions:
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.bathroom_shower_detected
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+      - action: script.bathroom_shower_boost_now
+
+  # ---------------------------------------------------------------------------
+  # PHASE TRANSITIONS
+  # ---------------------------------------------------------------------------
+  # timer.finished only fires when a timer runs out naturally, never when it is
+  # cancelled - so cancelling the boost cannot roll over into the dry phase.
+  - id: bathroom_shower_boost_finished
+    alias: "Bathroom: boost finished, switch to drying"
+    mode: single
+    triggers:
+      - trigger: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.bathroom_shower_boost
+    conditions:
+      # A zero-length dry phase means "stop after warming".
+      - condition: numeric_state
+        entity_id: input_number.bathroom_dry_minutes
+        above: 0
+    actions:
+      - action: script.bathroom_radiator_set
+        data:
+          hvac_mode: heat
+          temperature: "{{ states('input_number.bathroom_dry_temperature') | float(22) }}"
+      - action: timer.start
+        target:
+          entity_id: timer.bathroom_shower_dry
+        data:
+          duration: >
+            {{ (states('input_number.bathroom_dry_minutes') | float(30) * 60)
+               | int | timestamp_custom('%H:%M:%S', false) }}
+
+  - id: bathroom_shower_boost_finished_no_dry
+    alias: "Bathroom: boost finished with drying disabled"
+    mode: single
+    triggers:
+      - trigger: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.bathroom_shower_boost
+    conditions:
+      - condition: numeric_state
+        entity_id: input_number.bathroom_dry_minutes
+        below: 1
+    actions:
+      - action: script.bathroom_shower_cancel
+
+  - id: bathroom_shower_dry_finished
+    alias: "Bathroom: drying finished, switch off"
+    mode: single
+    triggers:
+      - trigger: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.bathroom_shower_dry
+    actions:
+      - action: script.bathroom_shower_cancel
+
+  # ---------------------------------------------------------------------------
+  # LIVE TUNING
+  # ---------------------------------------------------------------------------
+  # Applies a temperature change straight away when it belongs to the phase
+  # that is currently running, so adjusting a slider has a visible effect.
+  - id: bathroom_shower_apply_temperature_change
+    alias: "Bathroom: apply temperature change to running phase"
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: state
+        entity_id: input_number.bathroom_boost_temperature
+        id: boost
+      - trigger: state
+        entity_id: input_number.bathroom_dry_temperature
+        id: dry
+    conditions:
+      - condition: or
+        conditions:
+          - condition: and
+            conditions:
+              - condition: trigger
+                id: boost
+              - condition: state
+                entity_id: timer.bathroom_shower_boost
+                state: active
+          - condition: and
+            conditions:
+              - condition: trigger
+                id: dry
+              - condition: state
+                entity_id: timer.bathroom_shower_dry
+                state: active
+    actions:
+      - action: script.bathroom_radiator_set
+        data:
+          hvac_mode: heat
+          temperature: >
+            {% if trigger.id == 'boost' %}
+              {{ states('input_number.bathroom_boost_temperature') | float(24) }}
+            {% else %}
+              {{ states('input_number.bathroom_dry_temperature') | float(22) }}
+            {% endif %}
+
+  # ---------------------------------------------------------------------------
+  # OVERRIDES AND SAFETY
+  # ---------------------------------------------------------------------------
+  # Switching the radiator off by hand or in the Tuya app abandons the session
+  # instead of letting the timers switch it back on at the next phase.
+  - id: bathroom_shower_manual_override
+    alias: "Bathroom: manual off cancels the session"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: climate.badkamer_radiator
+        to: "off"
+        for: "00:00:10"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.bathroom_shower_session
+        state: "on"
+      # Our own overload switch-off must not be mistaken for a human one.
+      - condition: state
+        entity_id: input_boolean.bathroom_power_hold
+        state: "off"
+    actions:
+      # Otherwise an unconfirmed heat command would be retried and undo this.
+      - action: input_boolean.turn_off
+        target:
+          entity_id:
+            - input_boolean.bathroom_shower_session
+            - input_boolean.bathroom_radiator_command_pending
+      - action: timer.cancel
+        target:
+          entity_id:
+            - timer.bathroom_shower_boost
+            - timer.bathroom_shower_dry
+
+  - id: bathroom_shower_automation_disabled
+    alias: "Bathroom: master switch off ends any session"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.bathroom_shower_automation
+        to: "off"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.bathroom_shower_session
+        state: "on"
+    actions:
+      - action: script.bathroom_shower_cancel
+
+  # ---------------------------------------------------------------------------
+  # GROUP OVERLOAD PROTECTION
+  # ---------------------------------------------------------------------------
+  # A B16 breaker survives a modest overload for tens of seconds, so a few
+  # seconds of confirmation is safe and avoids tripping on the oven's inrush.
+  - id: bathroom_power_overload_pause
+    alias: "Bathroom: pause heating on group overload"
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.bathroom_power_overload
+        to: "on"
+        for: >
+          {{ (states('input_number.bathroom_power_trip_seconds') | int(5))
+             | timestamp_custom('%H:%M:%S', false) }}
+      # No meter means no protection, so skip the trip delay.
+      - trigger: state
+        entity_id: sensor.bathroom_group_power
+        to:
+          - unavailable
+          - unknown
+    conditions:
+      - condition: state
+        entity_id: input_boolean.bathroom_shower_session
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.bathroom_power_hold
+        state: "off"
+    actions:
+      - action: script.bathroom_power_pause
+
+  - id: bathroom_power_restore
+    alias: "Bathroom: resume heating when power is safe"
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.bathroom_power_headroom
+        to: "on"
+        for: >
+          {{ (states('input_number.bathroom_power_recovery_seconds') | int(60))
+             | timestamp_custom('%H:%M:%S', false) }}
+      # Level-triggered fallback: if the headroom sensor was already 'on' when
+      # the hold began, the state trigger above never fires again.
+      - trigger: time_pattern
+        minutes: "/1"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.bathroom_shower_session
+        state: "on"
+      - condition: state
+        entity_id: input_boolean.bathroom_power_hold
+        state: "on"
+      - condition: state
+        entity_id: binary_sensor.bathroom_power_headroom
+        state: "on"
+        for: >
+          {{ (states('input_number.bathroom_power_recovery_seconds') | int(60))
+             | timestamp_custom('%H:%M:%S', false) }}
+    actions:
+      - action: script.bathroom_power_resume
+
+  # Without this the radiator could switch itself on hours later, long after
+  # anyone would expect the shower cycle to be over.
+  - id: bathroom_power_hold_timeout
+    alias: "Bathroom: abandon a session held too long"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: input_boolean.bathroom_power_hold
+        to: "on"
+        for: >
+          {{ (states('input_number.bathroom_power_hold_timeout_minutes') | int(90) * 60)
+             | timestamp_custom('%H:%M:%S', false) }}
+    conditions:
+      - condition: state
+        entity_id: input_boolean.bathroom_shower_session
+        state: "on"
+    actions:
+      - action: script.bathroom_shower_cancel
+      - action: persistent_notification.create
+        data:
+          title: Bathroom heating abandoned
+          notification_id: bathroom_power_hold
+          message: >
+            The shower cycle was waiting for spare capacity on the bathroom
+            group for too long and has been cancelled.
+            {% if states('sensor.bathroom_group_power') | is_number %}
+            Group load stayed
+            above {{ states('input_number.bathroom_group_power_limit') | float(3500)
+                     - states('input_number.bathroom_radiator_power') | float(1000) }} W.
+            {% else %}
+            The group power meter is not reporting.
+            {% endif %}
+
+  # ---------------------------------------------------------------------------
+  # COMMAND VERIFICATION
+  # ---------------------------------------------------------------------------
+  - id: bathroom_radiator_command_monitor
+    alias: "Bathroom: confirm radiator command, retry if missed"
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.bathroom_radiator_in_sync
+        to: "on"
+      # Level-triggered: a persisting mismatch produces no new state change.
+      - trigger: time_pattern
+        seconds: "/15"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.bathroom_radiator_command_pending
+        state: "on"
+    actions:
+      - choose:
+          - conditions:
+              - condition: state
+                entity_id: binary_sensor.bathroom_radiator_in_sync
+                state: "on"
+            sequence:
+              - action: input_boolean.turn_off
+                target:
+                  entity_id: input_boolean.bathroom_radiator_command_pending
+              - action: persistent_notification.dismiss
+                data:
+                  notification_id: bathroom_radiator_command
+          # A full interval since both the last send and the last change, so a
+          # slow report-back is not answered with a duplicate command.
+          - conditions:
+              - condition: state
+                entity_id: binary_sensor.bathroom_radiator_in_sync
+                state: "off"
+                for: >
+                  {{ (states('input_number.bathroom_radiator_retry_seconds') | int(30))
+                     | timestamp_custom('%H:%M:%S', false) }}
+              - condition: template
+                value_template: >
+                  {% set ts = state_attr('input_datetime.bathroom_radiator_last_sent', 'timestamp') | float(0) %}
+                  {% set gap = states('input_number.bathroom_radiator_retry_seconds') | float(30) %}
+                  {{ ts < 946684800 or (now().timestamp() - ts) >= gap }}
+            sequence:
+              - if:
+                  - condition: template
+                    value_template: >
+                      {{ states('counter.bathroom_radiator_command_retries') | int(0)
+                         < states('input_number.bathroom_radiator_max_retries') | int(5) }}
+                then:
+                  - action: counter.increment
+                    target:
+                      entity_id: counter.bathroom_radiator_command_retries
+                  - action: script.bathroom_radiator_send
+                else:
+                  - action: input_boolean.turn_off
+                    target:
+                      entity_id: input_boolean.bathroom_radiator_command_pending
+                  - action: persistent_notification.create
+                    data:
+                      title: Bathroom radiator not responding
+                      notification_id: bathroom_radiator_command
+                      message: >
+                        The radiator did not confirm
+                        {% if is_state('input_select.bathroom_radiator_desired_mode', 'off') -%}
+                          switching off
+                        {%- else -%}
+                          heating to {{ states('input_number.bathroom_radiator_desired_temperature') }} °C
+                        {%- endif %}
+                        after {{ states('counter.bathroom_radiator_command_retries') }} retries.
+                        It reports {{ states('climate.badkamer_radiator') }} at
+                        {{ state_attr('climate.badkamer_radiator', 'temperature') }} °C.
+                        Check the Tuya connection.
+
+  # ---------------------------------------------------------------------------
+  # POWER METER HEALTH
+  # ---------------------------------------------------------------------------
+  - id: bathroom_group_meter_offline
+    alias: "Bathroom: group power meter not reporting"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: sensor.shellyemg3_e4b32335e63c_energy_meter_0_power
+        to:
+          - unavailable
+          - unknown
+        for: "00:05:00"
+    actions:
+      - action: persistent_notification.create
+        data:
+          title: Bathroom group meter offline
+          notification_id: bathroom_group_meter_offline
+          message: >
+            The Shelly EM on the radiator/oven group has not reported for
+            5 minutes. The radiator is held off until it returns.
+
+  # ---------------------------------------------------------------------------
+  # SENSOR HEALTH
+  # ---------------------------------------------------------------------------
+  - id: bathroom_sensor_battery_low
+    alias: "Bathroom: sensor battery low"
+    mode: single
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.ewelink_snzb_02p_battery
+        below: input_number.bathroom_battery_alert_level
+        for: "00:30:00"
+    actions:
+      - action: persistent_notification.create
+        data:
+          title: Bathroom sensor battery low
+          notification_id: bathroom_sensor_battery
+          message: >
+            The bathroom temperature/humidity sensor is at
+            {{ states('sensor.ewelink_snzb_02p_battery') }}%.
+            Replace the CR2477 battery.
+
+  # A dead battery or a dropped Zigbee link would silently freeze the humidity
+  # reading, and a frozen reading can never trigger the shower detection again.
+  - id: bathroom_sensor_offline
+    alias: "Bathroom: sensor not reporting"
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: sensor.ewelink_snzb_02p_humidity
+        to:
+          - unavailable
+          - unknown
+        for: "06:00:00"
+    actions:
+      - action: persistent_notification.create
+        data:
+          title: Bathroom sensor offline
+          notification_id: bathroom_sensor_offline
+          message: >
+            The bathroom humidity sensor has not reported for 6 hours.
+            Shower detection is inactive until it returns.

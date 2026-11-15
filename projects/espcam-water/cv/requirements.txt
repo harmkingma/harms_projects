@@ -1,0 +1,6 @@
+opencv-python-headless
+numpy
+pyyaml
+paho-mqtt>=2.1,<3
+websockets>=12
+tzdata

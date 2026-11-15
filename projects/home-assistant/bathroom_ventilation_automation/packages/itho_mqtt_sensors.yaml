@@ -1,0 +1,66 @@
+# =============================================================================
+# Itho CVE MQTT sensors - temperature, humidity and fan speed
+# =============================================================================
+# CVE MQTT auto-discovery only ever creates the fan entity. Everything the
+# add-on reads over I2C is published as one JSON blob to the status topic but
+# is never turned into entities, so they are declared here by hand.
+#
+# BEFORE THIS WORKS, FIND YOUR STATUS TOPIC
+#   Settings > Devices & services > MQTT > Configure > Listen to a topic
+#   Subscribe to:  #
+#   Look for a retained JSON payload containing temp/humidity values. The path
+#   is usually <base>/ithostatus, where <base> is the Base topic on the add-on
+#   web interface MQTT page. Replace the topic below if yours differs.
+#
+# ABOUT THE KEY NAMES
+# The add-on's System settings page has a "Normalize keys" option that decides
+# whether the JSON uses short keys (temp, hum) or the raw Itho labels
+# ("Temp (°C)", "Hum (%)"). The templates below accept either, so the setting
+# does not matter. If a sensor stays 'unknown', the key is named something else
+# again - read the payload and add that spelling.
+#
+# Easier alternative: the HACS integration at
+# https://github.com/jasperslits/haithowifi creates all of these for you.
+#
+# NOTE ON WHAT THIS SENSOR ACTUALLY MEASURES
+# The Itho's sensor sits in the extract air duct, so it reads a blend of
+# bathroom, kitchen and toilet air. Useful as a whole-house trend, but it is
+# NOT a bathroom measurement - fan control stays on the Zigbee sensor.
+# =============================================================================
+
+mqtt:
+  sensor:
+    - name: "Itho Temperature"
+      unique_id: itho_cve_temperature
+      state_topic: "itho/ithostatus"
+      device_class: temperature
+      unit_of_measurement: "°C"
+      state_class: measurement
+      value_template: >
+        {% if value_json.temp is defined %}{{ value_json.temp }}
+        {% elif value_json['Temp (°C)'] is defined %}{{ value_json['Temp (°C)'] }}
+        {% endif %}
+
+    - name: "Itho Humidity"
+      unique_id: itho_cve_humidity
+      state_topic: "itho/ithostatus"
+      device_class: humidity
+      unit_of_measurement: "%"
+      state_class: measurement
+      value_template: >
+        {% if value_json.hum is defined %}{{ value_json.hum }}
+        {% elif value_json['Hum (%)'] is defined %}{{ value_json['Hum (%)'] }}
+        {% endif %}
+
+    # Confirms the unit actually acted on a speed command, rather than silently
+    # ignoring it because the CVE is not in medium mode.
+    - name: "Itho Fan Speed"
+      unique_id: itho_cve_fan_rpm
+      state_topic: "itho/ithostatus"
+      unit_of_measurement: "rpm"
+      state_class: measurement
+      icon: mdi:fan
+      value_template: >
+        {% if value_json['Fan speed (rpm)'] is defined %}{{ value_json['Fan speed (rpm)'] }}
+        {% elif value_json.fanspeed is defined %}{{ value_json.fanspeed }}
+        {% endif %}

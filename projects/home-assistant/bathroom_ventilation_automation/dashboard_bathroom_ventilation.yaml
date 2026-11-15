@@ -1,0 +1,212 @@
+# Bathroom Ventilation Dashboard — complete raw configuration
+#
+# Setup: open your dashboard -> Edit Dashboard -> 3-dot menu -> Raw configuration editor
+#        SELECT ALL existing content, DELETE it, then paste this entire file.
+#
+# To add this as an extra view instead, paste only the "- title: Ventilation"
+# block below as a new entry under the existing views:.
+
+views:
+  - title: Ventilation
+    path: ventilation
+    icon: mdi:fan
+    cards:
+      # -----------------------------------------------------------------------
+      - type: entities
+        title: Fan Status
+        show_header_toggle: false
+        entities:
+          - entity: fan.cve_silent_fan
+            name: Itho CVE
+          - entity: sensor.cve_silent_ventilation_setpoint
+            name: Ventilation Setpoint
+          - entity: sensor.bathroom_fan_target_speed
+            name: Target Speed
+          - entity: sensor.bathroom_fan_commanded_speed
+            name: Commanded (calibrated)
+          - entity: sensor.bathroom_fan_raw_demand
+            name: Raw Demand
+          - type: divider
+          - entity: input_boolean.bathroom_fan_auto
+            name: Automation Enabled
+          - entity: sensor.bathroom_fan_boost_elapsed
+            name: Boost Elapsed
+          - entity: input_datetime.bathroom_fan_last_command
+            name: Last Command
+
+      # -----------------------------------------------------------------------
+      - type: entities
+        title: Humidity Inputs
+        show_header_toggle: false
+        entities:
+          - entity: sensor.ewelink_snzb_02p_humidity
+            name: Bathroom Humidity
+          - entity: sensor.bathroom_humidity_baseline
+            name: Baseline (3 h minimum)
+          - entity: sensor.bathroom_humidity_above_baseline
+            name: Excess Above Baseline
+          - entity: input_boolean.bathroom_shower_session
+            name: Shower Session
+
+      # -----------------------------------------------------------------------
+      # Read from the extract duct, so a blend of bathroom, kitchen and toilet
+      # air. Shown for cross-checking only - control runs on the Zigbee sensor.
+      - type: entities
+        title: Itho Unit Sensors
+        show_header_toggle: false
+        entities:
+          - entity: sensor.itho_fan_speed
+            name: Fan Speed
+          - entity: sensor.itho_humidity
+            name: Extract Humidity
+          - entity: sensor.itho_temperature
+            name: Extract Temperature
+
+      # -----------------------------------------------------------------------
+      - type: entities
+        title: Cooking Boost
+        show_header_toggle: false
+        entities:
+          - entity: input_boolean.cooking_boost_enabled
+            name: Enabled
+          - entity: timer.cooking_boost
+            name: Boost Remaining
+          - entity: sensor.itho_humidity_rate
+            name: Extract Humidity Rate
+          - entity: sensor.itho_humidity_above_baseline
+            name: Extract Rise Above Baseline
+          - type: divider
+          - entity: input_number.cooking_fan_speed
+            name: Cooking Fan Speed
+          - entity: input_number.cooking_minutes
+            name: Boost Duration
+          - entity: input_number.cooking_rate_threshold
+            name: Rate Threshold
+          - entity: input_number.cooking_rise_above_baseline
+            name: Rise Above Baseline
+
+      # -----------------------------------------------------------------------
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.bathroom_fan_target_speed
+            name: Target
+            min: 0
+            max: 100
+            severity:
+              green: 0
+              yellow: 50
+              red: 80
+          - type: gauge
+            entity: sensor.bathroom_humidity_above_baseline
+            name: Excess RH
+            min: 0
+            max: 25
+            needle: true
+            severity:
+              green: 0
+              yellow: 5
+              red: 15
+
+      # -----------------------------------------------------------------------
+      # Speed rises linearly between Excess Low and Excess High. Widen the gap
+      # for gentler ramping, narrow it for a more aggressive response.
+      - type: entities
+        title: Response Curve
+        show_header_toggle: false
+        entities:
+          - entity: input_number.bathroom_fan_excess_low
+            name: Excess Low
+          - entity: input_number.bathroom_fan_excess_high
+            name: Excess High
+          - type: divider
+          - entity: input_number.bathroom_fan_base_speed
+            name: Base Speed
+          - entity: input_number.bathroom_fan_max_speed
+            name: Max Speed
+          - entity: input_number.bathroom_fan_shower_min_speed
+            name: Shower Minimum Speed
+
+      # -----------------------------------------------------------------------
+      - type: entities
+        title: Noise and Energy Limits
+        show_header_toggle: false
+        entities:
+          - entity: input_number.bathroom_fan_boost_minutes
+            name: Boost Time Limit
+          - entity: input_number.bathroom_fan_boost_cap_speed
+            name: Boost Cap Speed
+          - type: divider
+          - entity: input_number.bathroom_fan_night_cap_speed
+            name: Night Cap Speed
+          - entity: input_datetime.bathroom_fan_night_start
+            name: Night Start
+          - entity: input_datetime.bathroom_fan_night_end
+            name: Night End
+
+      # -----------------------------------------------------------------------
+      # Compare Target against the Itho's own speed status. With calibration on
+      # they should match; with it off the Itho reads a few points lower.
+      - type: entities
+        title: Speed Calibration
+        show_header_toggle: false
+        entities:
+          - entity: input_boolean.bathroom_fan_calibration
+            name: Calibration Enabled
+          - entity: input_number.bathroom_fan_cal_gain
+            name: Gain
+          - entity: input_number.bathroom_fan_cal_offset
+            name: Offset
+          - type: divider
+          - entity: sensor.bathroom_fan_target_speed
+            name: Target
+          - entity: sensor.bathroom_fan_commanded_speed
+            name: Sent To Fan
+          - entity: sensor.cve_silent_ventilation_setpoint
+            name: Itho Reports
+          - entity: sensor.bathroom_fan_mismatch
+            name: Mismatch
+          - entity: input_number.bathroom_fan_mismatch_tolerance
+            name: Mismatch Tolerance
+
+      # -----------------------------------------------------------------------
+      - type: entities
+        title: Loop Stability
+        show_header_toggle: false
+        entities:
+          - entity: input_number.bathroom_fan_deadband
+            name: Deadband
+          - entity: input_number.bathroom_fan_min_interval_seconds
+            name: Minimum Command Interval
+          - entity: input_number.bathroom_fan_reassert_minutes
+            name: Re-assert Interval
+          - entity: input_number.bathroom_fan_last_commanded
+            name: Last Commanded
+
+      # -----------------------------------------------------------------------
+      # Raw history: these move slowly enough that statistics buckets would
+      # hide the detail needed to tune the curve.
+      - type: history-graph
+        title: Humidity and Fan Response
+        hours_to_show: 24
+        entities:
+          - entity: sensor.ewelink_snzb_02p_humidity
+            name: Humidity
+          - entity: sensor.bathroom_humidity_above_baseline
+            name: Excess
+          - entity: sensor.bathroom_fan_target_speed
+            name: Target Speed
+
+      # -----------------------------------------------------------------------
+      # If rpm does not follow the commanded speed, the CVE is refusing I2C
+      # commands - it only accepts them in medium mode.
+      - type: history-graph
+        title: Commanded vs Actual
+        hours_to_show: 12
+        entities:
+          - entity: sensor.bathroom_fan_target_speed
+            name: Target Speed
+          - entity: sensor.itho_fan_speed
+            name: Actual rpm
+          - entity: sensor.itho_humidity
+            name: Extract Humidity

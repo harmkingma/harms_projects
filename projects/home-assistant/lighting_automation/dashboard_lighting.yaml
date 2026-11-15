@@ -1,0 +1,181 @@
+# Lighting Dashboard — complete raw configuration
+#
+# Setup: open your dashboard -> Edit Dashboard -> 3-dot menu -> Raw configuration editor
+#        SELECT ALL existing content, DELETE it, then paste this entire file.
+#
+# To add this as an extra view instead, paste only the "- title: Lights"
+# block below as a new entry under the existing views:.
+
+views:
+  - title: Lights
+    path: lights
+    icon: mdi:lightbulb-group
+    cards:
+      - type: button
+        name: All Lights Off
+        icon: mdi:lightbulb-group-off
+        show_state: false
+        icon_height: 60px
+        tap_action:
+          action: perform-action
+          perform_action: script.lights_switch_reliable
+          data:
+            entities: group.all_house_lights
+            command: 'off'
+      - type: grid
+        title: Living Areas
+        columns: 2
+        square: false
+        cards:
+          - type: tile
+            entity: light.dimmer_woonkamer_light
+            name: Woonkamer
+            tap_action:
+              action: toggle
+            features:
+              - type: light-brightness
+          - type: tile
+            entity: light.dimmer_woonkamer_light_2
+            name: Eetkamer
+            tap_action:
+              action: toggle
+            features:
+              - type: light-brightness
+          - type: tile
+            entity: light.keuken_licht
+            name: Keuken
+            tap_action:
+              action: toggle
+            features:
+              - type: light-brightness
+          - type: tile
+            entity: light.bijkeuken_licht
+            name: Bijkeuken
+            icon: mdi:lightbulb
+            tap_action:
+              action: toggle
+      - type: grid
+        title: Bedrooms and Upstairs
+        columns: 2
+        square: false
+        cards:
+          - type: tile
+            entity: light.slaapkamer_licht
+            name: Slaapkamer
+            tap_action:
+              action: toggle
+            features:
+              - type: light-brightness
+          - type: tile
+            entity: light.kamer_alexander
+            name: Kamer Alexander
+            tap_action:
+              action: toggle
+          - type: tile
+            entity: light.overloop_light
+            name: Overloop
+            tap_action:
+              action: toggle
+          - type: tile
+            entity: light.attic
+            name: Zolder
+            tap_action:
+              action: toggle
+      - type: grid
+        title: Hallway and Outside
+        columns: 2
+        square: false
+        cards:
+          - type: tile
+            entity: light.hallway
+            name: Hal
+            tap_action:
+              action: toggle
+          - type: tile
+            entity: light.hallway_licht_wc
+            name: WC
+            tap_action:
+              action: toggle
+          - type: tile
+            entity: switch.garage_licht
+            name: garage
+            tap_action:
+              action: toggle
+          - type: tile
+            entity: light.hallway_outside_light
+            name: Buitenlamp
+            icon: mdi:outdoor-lamp
+            tap_action:
+              action: toggle
+          - type: tile
+            entity: switch.outside_back
+            name: Buitenlamp achter
+            icon: mdi:outdoor-lamp
+            tap_action:
+              action: toggle
+      - type: entities
+        title: Scheduled Switch-off
+        show_header_toggle: false
+        entities:
+          - type: section
+            label: Time 1 - all lights except Woonkamer 1
+          - entity: input_boolean.lights_off_time_1_enabled
+            name: Enabled
+          - entity: input_datetime.lights_off_time_1
+            name: Switch-off Time
+          - type: section
+            label: Time 2 - Woonkamer 1
+          - entity: input_boolean.lights_off_time_2_enabled
+            name: Enabled
+          - entity: input_datetime.lights_off_time_2
+            name: Switch-off Time
+          - type: divider
+          - entity: input_number.lights_command_repeats
+            name: Command Repeats
+      - type: entities
+        title: WC Auto-off
+        show_header_toggle: false
+        entities:
+          - entity: input_boolean.wc_light_auto_off_enabled
+            name: Enabled
+          - entity: input_number.wc_light_auto_off_minutes
+            name: Delay
+          - entity: timer.wc_light_auto_off
+            name: Remaining
+      - type: entities
+        title: Outside Presence Lighting (Ring)
+        show_header_toggle: false
+        entities:
+          - entity: input_number.outside_presence_off_minutes
+            name: Off Delay After Last Motion
+          - entity: sun.sun
+            name: Sun
+          - type: section
+            label: Front - doorbell
+          - entity: input_boolean.outside_front_presence_enabled
+            name: Enabled
+          - entity: timer.outside_front_presence
+            name: Remaining
+          - type: section
+            label: Garden - garden camera
+          - entity: input_boolean.outside_garden_presence_enabled
+            name: Enabled
+          - entity: timer.outside_garden_presence
+            name: Remaining
+      - type: entities
+        title: Attic Presence Light (Radar)
+        show_header_toggle: false
+        entities:
+          - entity: input_boolean.attic_presence_light_enabled
+            name: Enabled
+          - entity: input_number.attic_presence_off_minutes
+            name: Off Delay Without Presence
+          - type: divider
+          - entity: binary_sensor.attic_presence_temperature_attic_presence
+            name: Presence
+          - entity: binary_sensor.attic_presence_temperature_attic_quiet_presence
+            name: Quiet Presence
+          - entity: light.attic
+            name: Zolder
+          - entity: timer.attic_presence_light
+            name: Auto-off Timer

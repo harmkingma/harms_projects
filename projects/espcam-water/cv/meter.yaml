@@ -1,0 +1,53 @@
+reference: reference/ref_mounted.jpg
+ref_center:
+- 633.0
+- 661.0
+ref_radius: 418.0
+rotation_deg: -95.5
+size: 896
+dials:
+- name: x0.1
+  factor: 0.1
+  cx: 682.4
+  cy: 471.8
+  r: 72.6
+  zero_deg: 3.1
+- name: x0.01
+  factor: 0.01
+  cx: 616.4
+  cy: 643.8
+  r: 73.4
+  zero_deg: 3.8
+- name: x0.001
+  factor: 0.001
+  cx: 445.7
+  cy: 714.2
+  r: 78.1
+  zero_deg: 7.0
+- name: x0.0001
+  factor: 0.0001
+  cx: 266.8
+  cy: 643.9
+  r: 76.4
+  zero_deg: 0.0
+digit_boxes:
+- - 221
+  - 290
+  - 52
+  - 64
+- - 284
+  - 290
+  - 52
+  - 64
+- - 346
+  - 290
+  - 52
+  - 64
+- - 405
+  - 290
+  - 52
+  - 64
+- - 468
+  - 290
+  - 52
+  - 64

@@ -1,0 +1,566 @@
+# =============================================================================
+# Airco Package - timeslot control, 4 timeslots per room
+# =============================================================================
+# Requires Home Assistant 2024.10+ (modern triggers/conditions/actions syntax).
+#
+# Two Daikin units with a Faikout module, added to HA via MQTT discovery.
+# Room keys used throughout this package:
+#   masterbedroom   ->  climate.faikout_masterbedroom_mqtt_hvac
+#   slaapkamer_2    ->  climate.faikout_slaapkamer_2_mqtt_hvac
+#
+# External entities used (Settings -> Entities, search "faikout"); if yours
+# differ, search & replace them in this file:
+#   climate.faikout_masterbedroom_mqtt_hvac
+#   climate.faikout_slaapkamer_2_mqtt_hvac
+#   sensor.faikout_<room>_lifetime_heating_energy    (kWh)
+#   sensor.faikout_<room>_lifetime_cooling_energy    (kWh)
+#
+# INSTALL
+#   1. Copy this file to /config/packages/airco.yaml
+#   2. Ensure configuration.yaml contains:
+#        homeassistant:
+#          packages: !include_dir_named packages
+#   3. Restart Home Assistant.
+#   4. Set up the timeslots on the dashboard (see FIRST RUN), THEN enable Auto.
+#
+# CONTROL
+# Each room has four timeslots, each with an enable switch, start, end, mode
+# (Heat / Cool / Auto / Off) and temperature. The airco itself keeps the room
+# at temperature; this package only tells it what to do at slot boundaries:
+#
+#   slot starts, mode Heat/Cool/Auto  -> airco on in that mode at the slot
+#                                        temperature
+#   slot starts, mode Off             -> airco off
+#   slot ends, no other slot active   -> airco off (nothing after an Off slot)
+#
+#   - Changing the mode or temperature of the active slot, or switching Auto
+#     on during a slot, applies it at once.
+#   - A slot may cross midnight (e.g. 22:00 -> 07:00).
+#   - Start == end means the slot is never active.
+#   - If slots overlap, the lowest-numbered slot wins; when it ends, the other
+#     one takes over.
+#   - Every command is checked and repeated (up to 3 times) when the unit does
+#     not confirm it, because Faikout MQTT commands are occasionally lost.
+#
+# MANUAL USE
+# Between slot boundaries the airco is left alone: changes made with the
+# remote or the app hold until the next slot starts or ends. With Auto off the
+# timeslots do nothing at all.
+#
+# FIRST RUN
+# Helpers carry no 'initial:' value, because that would overwrite your
+# settings on every restart. Per slot set start, end, mode and temperature
+# BEFORE enabling it, then switch Auto on.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+input_boolean:
+  airco_masterbedroom_auto:
+    name: Airco Masterbedroom Auto
+    icon: mdi:thermostat-auto
+  airco_masterbedroom_slot_1_enabled:
+    name: Airco Masterbedroom Slot 1 Enabled
+    icon: mdi:numeric-1-box-outline
+  airco_masterbedroom_slot_2_enabled:
+    name: Airco Masterbedroom Slot 2 Enabled
+    icon: mdi:numeric-2-box-outline
+  airco_masterbedroom_slot_3_enabled:
+    name: Airco Masterbedroom Slot 3 Enabled
+    icon: mdi:numeric-3-box-outline
+  airco_masterbedroom_slot_4_enabled:
+    name: Airco Masterbedroom Slot 4 Enabled
+    icon: mdi:numeric-4-box-outline
+
+  airco_slaapkamer_2_auto:
+    name: Airco Slaapkamer 2 Auto
+    icon: mdi:thermostat-auto
+  airco_slaapkamer_2_slot_1_enabled:
+    name: Airco Slaapkamer 2 Slot 1 Enabled
+    icon: mdi:numeric-1-box-outline
+  airco_slaapkamer_2_slot_2_enabled:
+    name: Airco Slaapkamer 2 Slot 2 Enabled
+    icon: mdi:numeric-2-box-outline
+  airco_slaapkamer_2_slot_3_enabled:
+    name: Airco Slaapkamer 2 Slot 3 Enabled
+    icon: mdi:numeric-3-box-outline
+  airco_slaapkamer_2_slot_4_enabled:
+    name: Airco Slaapkamer 2 Slot 4 Enabled
+    icon: mdi:numeric-4-box-outline
+
+input_select:
+  airco_masterbedroom_slot_1_mode:
+    name: Airco Masterbedroom Slot 1 Mode
+    icon: mdi:hvac
+    options: [Heat, Cool, Auto, "Off"]
+  airco_masterbedroom_slot_2_mode:
+    name: Airco Masterbedroom Slot 2 Mode
+    icon: mdi:hvac
+    options: [Heat, Cool, Auto, "Off"]
+  airco_masterbedroom_slot_3_mode:
+    name: Airco Masterbedroom Slot 3 Mode
+    icon: mdi:hvac
+    options: [Heat, Cool, Auto, "Off"]
+  airco_masterbedroom_slot_4_mode:
+    name: Airco Masterbedroom Slot 4 Mode
+    icon: mdi:hvac
+    options: [Heat, Cool, Auto, "Off"]
+
+  airco_slaapkamer_2_slot_1_mode:
+    name: Airco Slaapkamer 2 Slot 1 Mode
+    icon: mdi:hvac
+    options: [Heat, Cool, Auto, "Off"]
+  airco_slaapkamer_2_slot_2_mode:
+    name: Airco Slaapkamer 2 Slot 2 Mode
+    icon: mdi:hvac
+    options: [Heat, Cool, Auto, "Off"]
+  airco_slaapkamer_2_slot_3_mode:
+    name: Airco Slaapkamer 2 Slot 3 Mode
+    icon: mdi:hvac
+    options: [Heat, Cool, Auto, "Off"]
+  airco_slaapkamer_2_slot_4_mode:
+    name: Airco Slaapkamer 2 Slot 4 Mode
+    icon: mdi:hvac
+    options: [Heat, Cool, Auto, "Off"]
+
+input_datetime:
+  airco_masterbedroom_slot_1_start:
+    name: Airco Masterbedroom Slot 1 Start
+    has_date: false
+    has_time: true
+  airco_masterbedroom_slot_1_end:
+    name: Airco Masterbedroom Slot 1 End
+    has_date: false
+    has_time: true
+  airco_masterbedroom_slot_2_start:
+    name: Airco Masterbedroom Slot 2 Start
+    has_date: false
+    has_time: true
+  airco_masterbedroom_slot_2_end:
+    name: Airco Masterbedroom Slot 2 End
+    has_date: false
+    has_time: true
+  airco_masterbedroom_slot_3_start:
+    name: Airco Masterbedroom Slot 3 Start
+    has_date: false
+    has_time: true
+  airco_masterbedroom_slot_3_end:
+    name: Airco Masterbedroom Slot 3 End
+    has_date: false
+    has_time: true
+  airco_masterbedroom_slot_4_start:
+    name: Airco Masterbedroom Slot 4 Start
+    has_date: false
+    has_time: true
+  airco_masterbedroom_slot_4_end:
+    name: Airco Masterbedroom Slot 4 End
+    has_date: false
+    has_time: true
+
+  airco_slaapkamer_2_slot_1_start:
+    name: Airco Slaapkamer 2 Slot 1 Start
+    has_date: false
+    has_time: true
+  airco_slaapkamer_2_slot_1_end:
+    name: Airco Slaapkamer 2 Slot 1 End
+    has_date: false
+    has_time: true
+  airco_slaapkamer_2_slot_2_start:
+    name: Airco Slaapkamer 2 Slot 2 Start
+    has_date: false
+    has_time: true
+  airco_slaapkamer_2_slot_2_end:
+    name: Airco Slaapkamer 2 Slot 2 End
+    has_date: false
+    has_time: true
+  airco_slaapkamer_2_slot_3_start:
+    name: Airco Slaapkamer 2 Slot 3 Start
+    has_date: false
+    has_time: true
+  airco_slaapkamer_2_slot_3_end:
+    name: Airco Slaapkamer 2 Slot 3 End
+    has_date: false
+    has_time: true
+  airco_slaapkamer_2_slot_4_start:
+    name: Airco Slaapkamer 2 Slot 4 Start
+    has_date: false
+    has_time: true
+  airco_slaapkamer_2_slot_4_end:
+    name: Airco Slaapkamer 2 Slot 4 End
+    has_date: false
+    has_time: true
+
+input_number:
+  airco_masterbedroom_slot_1_temp:
+    name: Airco Masterbedroom Slot 1 Temperature
+    min: 16
+    max: 30
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+    icon: mdi:thermometer
+  airco_masterbedroom_slot_2_temp:
+    name: Airco Masterbedroom Slot 2 Temperature
+    min: 16
+    max: 30
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+    icon: mdi:thermometer
+  airco_masterbedroom_slot_3_temp:
+    name: Airco Masterbedroom Slot 3 Temperature
+    min: 16
+    max: 30
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+    icon: mdi:thermometer
+  airco_masterbedroom_slot_4_temp:
+    name: Airco Masterbedroom Slot 4 Temperature
+    min: 16
+    max: 30
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+    icon: mdi:thermometer
+
+  airco_slaapkamer_2_slot_1_temp:
+    name: Airco Slaapkamer 2 Slot 1 Temperature
+    min: 16
+    max: 30
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+    icon: mdi:thermometer
+  airco_slaapkamer_2_slot_2_temp:
+    name: Airco Slaapkamer 2 Slot 2 Temperature
+    min: 16
+    max: 30
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+    icon: mdi:thermometer
+  airco_slaapkamer_2_slot_3_temp:
+    name: Airco Slaapkamer 2 Slot 3 Temperature
+    min: 16
+    max: 30
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+    icon: mdi:thermometer
+  airco_slaapkamer_2_slot_4_temp:
+    name: Airco Slaapkamer 2 Slot 4 Temperature
+    min: 16
+    max: 30
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+    icon: mdi:thermometer
+
+# -----------------------------------------------------------------------------
+# Template sensors
+# -----------------------------------------------------------------------------
+# The two room blocks are identical apart from the climate entity and the
+# room key 'p' at the top of each template.
+template:
+  - sensor:
+      # ---------------------------------------------------------------- master
+      - name: Airco Masterbedroom Room Temperature
+        unique_id: airco_masterbedroom_room_temperature
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        availability: >
+          {{ state_attr('climate.faikout_masterbedroom_mqtt_hvac', 'current_temperature') | is_number }}
+        state: >
+          {{ state_attr('climate.faikout_masterbedroom_mqtt_hvac', 'current_temperature') | float | round(1) }}
+
+      # 0 = no slot active, otherwise 1..4.
+      - name: Airco Masterbedroom Active Slot
+        unique_id: airco_masterbedroom_active_slot
+        icon: mdi:calendar-clock
+        state: >
+          {% set p = 'masterbedroom' %}
+          {% set t = now().strftime('%H:%M:%S') %}
+          {% set ns = namespace(slot=0) %}
+          {% for i in [1, 2, 3, 4] %}
+            {% if ns.slot == 0 and is_state('input_boolean.airco_' ~ p ~ '_slot_' ~ i ~ '_enabled', 'on') %}
+              {% set s = states('input_datetime.airco_' ~ p ~ '_slot_' ~ i ~ '_start') %}
+              {% set e = states('input_datetime.airco_' ~ p ~ '_slot_' ~ i ~ '_end') %}
+              {% if s | length == 8 and e | length == 8 and s != e %}
+                {% if (s < e and s <= t < e) or (s > e and (t >= s or t < e)) %}
+                  {% set ns.slot = i %}
+                {% endif %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {{ ns.slot }}
+
+      - name: Airco Masterbedroom Status
+        unique_id: airco_masterbedroom_status
+        icon: mdi:air-conditioner
+        state: >
+          {% set p = 'masterbedroom' %}
+          {% set slot = states('sensor.airco_' ~ p ~ '_active_slot') | int(0) %}
+          {% if is_state('input_boolean.airco_' ~ p ~ '_auto', 'off') %}
+            Auto off
+          {% elif slot == 0 %}
+            No timeslot active
+          {% else %}
+            {% set s = 'airco_' ~ p ~ '_slot_' ~ slot %}
+            {% set mode = states('input_select.' ~ s ~ '_mode') %}
+            {% set temp = ' ' ~ states('input_number.' ~ s ~ '_temp') ~ ' °C' if mode != 'Off' else '' %}
+            Slot {{ slot }}: {{ mode }}{{ temp }} until {{ states('input_datetime.' ~ s ~ '_end')[:5] }}
+          {% endif %}
+
+      # ---------------------------------------------------------- slaapkamer 2
+      - name: Airco Slaapkamer 2 Room Temperature
+        unique_id: airco_slaapkamer_2_room_temperature
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        availability: >
+          {{ state_attr('climate.faikout_slaapkamer_2_mqtt_hvac', 'current_temperature') | is_number }}
+        state: >
+          {{ state_attr('climate.faikout_slaapkamer_2_mqtt_hvac', 'current_temperature') | float | round(1) }}
+
+      - name: Airco Slaapkamer 2 Active Slot
+        unique_id: airco_slaapkamer_2_active_slot
+        icon: mdi:calendar-clock
+        state: >
+          {% set p = 'slaapkamer_2' %}
+          {% set t = now().strftime('%H:%M:%S') %}
+          {% set ns = namespace(slot=0) %}
+          {% for i in [1, 2, 3, 4] %}
+            {% if ns.slot == 0 and is_state('input_boolean.airco_' ~ p ~ '_slot_' ~ i ~ '_enabled', 'on') %}
+              {% set s = states('input_datetime.airco_' ~ p ~ '_slot_' ~ i ~ '_start') %}
+              {% set e = states('input_datetime.airco_' ~ p ~ '_slot_' ~ i ~ '_end') %}
+              {% if s | length == 8 and e | length == 8 and s != e %}
+                {% if (s < e and s <= t < e) or (s > e and (t >= s or t < e)) %}
+                  {% set ns.slot = i %}
+                {% endif %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+          {{ ns.slot }}
+
+      - name: Airco Slaapkamer 2 Status
+        unique_id: airco_slaapkamer_2_status
+        icon: mdi:air-conditioner
+        state: >
+          {% set p = 'slaapkamer_2' %}
+          {% set slot = states('sensor.airco_' ~ p ~ '_active_slot') | int(0) %}
+          {% if is_state('input_boolean.airco_' ~ p ~ '_auto', 'off') %}
+            Auto off
+          {% elif slot == 0 %}
+            No timeslot active
+          {% else %}
+            {% set s = 'airco_' ~ p ~ '_slot_' ~ slot %}
+            {% set mode = states('input_select.' ~ s ~ '_mode') %}
+            {% set temp = ' ' ~ states('input_number.' ~ s ~ '_temp') ~ ' °C' if mode != 'Off' else '' %}
+            Slot {{ slot }}: {{ mode }}{{ temp }} until {{ states('input_datetime.' ~ s ~ '_end')[:5] }}
+          {% endif %}
+
+      # Indoor unit consumption. Lifetime outside energy is the outdoor unit's own
+      # meter, roughly heating + cooling already, so it is not added (Faikout #910).
+      - name: Airco Masterbedroom Energy
+        unique_id: airco_masterbedroom_energy
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        availability: >
+          {{ states('sensor.faikout_masterbedroom_lifetime_heating_energy') | is_number
+             and states('sensor.faikout_masterbedroom_lifetime_cooling_energy') | is_number }}
+        state: >
+          {{ (states('sensor.faikout_masterbedroom_lifetime_heating_energy') | float
+              + states('sensor.faikout_masterbedroom_lifetime_cooling_energy') | float) | round(2) }}
+
+      - name: Airco Slaapkamer 2 Energy
+        unique_id: airco_slaapkamer_2_energy
+        unit_of_measurement: "kWh"
+        device_class: energy
+        state_class: total_increasing
+        availability: >
+          {{ states('sensor.faikout_slaapkamer_2_lifetime_heating_energy') | is_number
+             and states('sensor.faikout_slaapkamer_2_lifetime_cooling_energy') | is_number }}
+        state: >
+          {{ (states('sensor.faikout_slaapkamer_2_lifetime_heating_energy') | float
+              + states('sensor.faikout_slaapkamer_2_lifetime_cooling_energy') | float) | round(2) }}
+
+# -----------------------------------------------------------------------------
+# Scripts
+# -----------------------------------------------------------------------------
+script:
+  # The only place that commands the airco units.
+  airco_apply_slot:
+    alias: "Airco: Apply Timeslot"
+    icon: mdi:calendar-clock
+    mode: queued
+    max: 20
+    fields:
+      room:
+        description: Room key
+        required: true
+        selector:
+          select:
+            options:
+              - masterbedroom
+              - slaapkamer_2
+      ended_slot:
+        description: Slot that just ended (0 = none); after an on-slot the airco is switched off
+        default: 0
+        selector:
+          number:
+            min: 0
+            max: 4
+    sequence:
+      - variables:
+          climate: >
+            {{ {'masterbedroom': 'climate.faikout_masterbedroom_mqtt_hvac',
+                'slaapkamer_2': 'climate.faikout_slaapkamer_2_mqtt_hvac'}[room] }}
+          p: "airco_{{ room }}"
+          slot: "{{ states('sensor.airco_' ~ room ~ '_active_slot') | int(0) }}"
+          ended: "{{ ended_slot | int(0) }}"
+          # heat / cool / auto / off, or none = nothing to do.
+          mode: >
+            {% if slot > 0 %}
+              {{ states('input_select.' ~ p ~ '_slot_' ~ slot ~ '_mode') | lower }}
+            {% elif ended > 0
+                  and not is_state('input_select.' ~ p ~ '_slot_' ~ ended ~ '_mode', 'Off') %}
+              off
+            {% else %}
+              none
+            {% endif %}
+          hvac: >
+            {% set modes = state_attr(climate, 'hvac_modes') | default([], true) %}
+            {% if mode == 'auto' %}{{ 'heat_cool' if 'heat_cool' in modes else 'auto' }}
+            {% else %}{{ mode }}{% endif %}
+          # Rounded to the 0.5 °C grid and clamped to what the unit accepts,
+          # otherwise the confirmation check below would never match.
+          setpoint: >
+            {% set sp = states('input_number.' ~ p ~ '_slot_' ~ slot ~ '_temp') | float(20) %}
+            {% set sp = (sp * 2) | round / 2 %}
+            {% set lo = state_attr(climate, 'min_temp') | float(10) %}
+            {% set hi = state_attr(climate, 'max_temp') | float(32) %}
+            {{ [[sp, lo] | max, hi] | min }}
+
+      - condition: template
+        value_template: >
+          {{ is_state('input_boolean.' ~ p ~ '_auto', 'on')
+             and mode != 'none' and has_value(climate) }}
+
+      - repeat:
+          sequence:
+            - if:
+                - condition: template
+                  value_template: "{{ hvac == 'off' }}"
+              then:
+                - action: climate.set_hvac_mode
+                  continue_on_error: true
+                  target:
+                    entity_id: "{{ climate }}"
+                  data:
+                    hvac_mode: "off"
+              else:
+                - action: climate.set_temperature
+                  continue_on_error: true
+                  target:
+                    entity_id: "{{ climate }}"
+                  data:
+                    hvac_mode: "{{ hvac }}"
+                    temperature: "{{ setpoint }}"
+            - wait_template: >
+                {{ is_state(climate, hvac)
+                   and (hvac == 'off'
+                        or (state_attr(climate, 'temperature') | float(-100) - setpoint | float) | abs < 0.25) }}
+              timeout: "00:00:30"
+              continue_on_timeout: true
+          until:
+            - condition: template
+              value_template: >
+                {{ repeat.index >= 3
+                   or (is_state(climate, hvac)
+                       and (hvac == 'off'
+                            or (state_attr(climate, 'temperature') | float(-100) - setpoint | float) | abs < 0.25)) }}
+
+# -----------------------------------------------------------------------------
+# Automations
+# -----------------------------------------------------------------------------
+automation:
+  - id: airco_timeslots
+    alias: "Airco: Timeslots"
+    description: Switches each bedroom airco on (mode + temperature) or off when a timeslot starts, and off when an on-slot ends.
+    mode: queued
+    max: 20
+    triggers:
+      # not_to: a template reload briefly makes the sensor unavailable.
+      - trigger: state
+        entity_id: sensor.airco_masterbedroom_active_slot
+        not_to:
+          - unavailable
+          - unknown
+        id: masterbedroom
+      - trigger: state
+        entity_id: sensor.airco_slaapkamer_2_active_slot
+        not_to:
+          - unavailable
+          - unknown
+        id: slaapkamer_2
+
+      - trigger: state
+        entity_id:
+          - input_boolean.airco_masterbedroom_auto
+          - input_select.airco_masterbedroom_slot_1_mode
+          - input_select.airco_masterbedroom_slot_2_mode
+          - input_select.airco_masterbedroom_slot_3_mode
+          - input_select.airco_masterbedroom_slot_4_mode
+          - input_number.airco_masterbedroom_slot_1_temp
+          - input_number.airco_masterbedroom_slot_2_temp
+          - input_number.airco_masterbedroom_slot_3_temp
+          - input_number.airco_masterbedroom_slot_4_temp
+        id: masterbedroom_settings
+      - trigger: state
+        entity_id:
+          - input_boolean.airco_slaapkamer_2_auto
+          - input_select.airco_slaapkamer_2_slot_1_mode
+          - input_select.airco_slaapkamer_2_slot_2_mode
+          - input_select.airco_slaapkamer_2_slot_3_mode
+          - input_select.airco_slaapkamer_2_slot_4_mode
+          - input_number.airco_slaapkamer_2_slot_1_temp
+          - input_number.airco_slaapkamer_2_slot_2_temp
+          - input_number.airco_slaapkamer_2_slot_3_temp
+          - input_number.airco_slaapkamer_2_slot_4_temp
+        id: slaapkamer_2_settings
+
+      # Catches a slot boundary missed while Home Assistant was down.
+      - trigger: homeassistant
+        event: start
+        id: start
+    variables:
+      rooms: >
+        {{ ['masterbedroom', 'slaapkamer_2'] if trigger.id == 'start'
+           else [trigger.id | replace('_settings', '')] }}
+      ended_slot: >
+        {{ trigger.from_state.state | int(0)
+           if trigger.id in ['masterbedroom', 'slaapkamer_2'] and trigger.from_state is not none
+           else 0 }}
+    conditions:
+      # A settings change only matters for the active slot, or Auto switching on.
+      - condition: template
+        value_template: >
+          {% if trigger.id.endswith('_settings') %}
+            {% set slot = states('sensor.airco_' ~ rooms[0] ~ '_active_slot') %}
+            {{ (trigger.to_state.domain == 'input_boolean' and trigger.to_state.state == 'on')
+               or ('_slot_' ~ slot ~ '_') in trigger.entity_id }}
+          {% else %}
+            true
+          {% endif %}
+    actions:
+      - repeat:
+          for_each: "{{ rooms }}"
+          sequence:
+            - action: script.airco_apply_slot
+              data:
+                room: "{{ repeat.item }}"
+                ended_slot: "{{ ended_slot }}"

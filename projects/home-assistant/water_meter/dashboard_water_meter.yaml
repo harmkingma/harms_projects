@@ -1,0 +1,310 @@
+# Water Meter Dashboard — complete raw configuration
+#
+# Setup: Settings -> Dashboards -> Add dashboard -> "New dashboard from scratch"
+#        name it e.g. "Water", open it -> Edit Dashboard -> 3-dot menu
+#        -> Raw configuration editor -> SELECT ALL, DELETE, paste this entire file.
+#
+# To add this as an extra view to an existing dashboard instead, paste only the
+# "- title: Water" block below as a new entry under the existing views:.
+#
+# Uses built-in cards only.
+
+views:
+  - title: Water
+    path: water
+    icon: mdi:water
+    cards:
+      # -----------------------------------------------------------------------
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: binary_sensor.water_continuous_flow
+            state: "on"
+        card:
+          type: markdown
+          content: >
+            ## <ha-icon icon="mdi:water-alert"></ha-icon> Possible leak
+
+            The meter has not stood still for
+            {{ states('input_number.wm_idle_minutes') | int(30) }} minutes in the last 24 hours.
+            Check taps, the toilet cistern and visible pipes.
+
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: binary_sensor.water_meter_reader_stale
+            state: "on"
+        card:
+          type: markdown
+          content: >
+            ## <ha-icon icon="mdi:camera-off"></ha-icon> Reader not reading
+
+            Last valid reading {{ states('sensor.water_meter_reading_age') }} min ago,
+            status **{{ states('sensor.water_meter_status') }}**
+            {{ state_attr('sensor.water_meter_status', 'detail') or '' }}.
+
+      # -----------------------------------------------------------------------
+      - type: horizontal-stack
+        cards:
+          - type: entity
+            entity: sensor.water_meter_total
+            name: Meter
+          - type: gauge
+            entity: sensor.water_meter_flow
+            name: Flow
+            unit: L/min
+            min: 0
+            max: 20
+            needle: true
+          - type: entity
+            entity: sensor.water_today
+            name: Today
+
+      - type: picture-entity
+        entity: camera.water_meter_last_image
+        name: Last reading
+        show_state: false
+        camera_view: auto
+
+      - type: entities
+        title: Reader
+        entities:
+          - entity: sensor.water_meter_status
+          - entity: sensor.water_meter_confidence
+          - entity: sensor.water_meter_last_valid_reading
+          - entity: sensor.water_meter_reading_age
+          - entity: number.water_meter_set_meter_value
+            name: Set meter value (m³)
+
+      # -----------------------------------------------------------------------
+      - type: statistics-graph
+        title: Daily use (m³)
+        entities:
+          - sensor.water_meter_total
+        stat_types:
+          - change
+        period: day
+        days_to_show: 30
+        chart_type: bar
+
+      - type: history-graph
+        title: Flow (24 h)
+        hours_to_show: 24
+        entities:
+          - entity: sensor.water_meter_flow
+
+      - type: entities
+        title: Consumption
+        entities:
+          - entity: sensor.water_daily
+            name: Today (m³)
+          - entity: sensor.water_weekly
+            name: This week (m³)
+          - entity: sensor.water_monthly
+            name: This month (m³)
+
+      # -----------------------------------------------------------------------
+      - type: entities
+        title: Leak detection settings
+        entities:
+          - entity: input_boolean.wm_alerts_enabled
+          - entity: input_number.wm_idle_minutes
+          - entity: input_number.wm_night_max_l
+          - entity: input_datetime.wm_night_start
+          - entity: input_datetime.wm_night_end
+          - entity: input_number.wm_long_flow_lpm
+          - entity: input_number.wm_long_flow_minutes
+          - entity: input_number.wm_stale_minutes
+          - entity: binary_sensor.water_continuous_flow
+          - entity: sensor.water_meter_last_idle
+
+  # Needs packages/water_usage.yaml.
+  - title: Water usage
+    path: water-usage
+    icon: mdi:shower-head
+    cards:
+      - type: markdown
+        title: Last water draw
+        content: >
+          {% set a = states.sensor.water_last_draw.attributes %}
+          {% if has_value('sensor.water_last_draw') %}
+          **{{ states('sensor.water_last_draw') }}** at {{ a.start[11:16] }}:
+          {{ a.volume_l }} L, water ran {{ a.flowing_min }} of {{ a.duration_min }} min
+          (avg {{ a.avg_flow_lpm }}, peak {{ a.peak_flow_lpm }} L/min),
+          gas {{ a.gas_m3 }} m³ ≈ {{ a.heat_kwh }} kWh heat
+          {{- ', plus ' ~ a.side_volume_l ~ ' L ' ~ a.side_category ~ ' water' if a.side_volume_l else '' }}
+          {{- ' — space heating was running, gas may include it' if a.space_heating_active else '' }}
+          {% else %}
+          No draw recorded yet.
+          {% endif %}
+
+      - type: glance
+        title: Showers
+        columns: 4
+        entities:
+          - entity: sensor.water_last_shower_volume
+            name: Last
+          - entity: sensor.water_shower_average_volume
+            name: Average
+          - entity: sensor.gas_shower_average
+            name: Gas each
+          - entity: sensor.shower_average_cost
+            name: Cost each
+          - entity: sensor.water_shower_count
+            name: Count
+          - entity: sensor.water_shower_daily
+            name: Today (L)
+          - entity: sensor.water_shower_monthly
+            name: Month (L)
+          - entity: sensor.gas_shower_monthly
+            name: Gas month
+
+      - type: glance
+        title: Average flow per use type (L/min)
+        columns: 4
+        entities:
+          - entity: sensor.water_shower_average_flow
+            name: Shower
+          - entity: sensor.water_toilet_average_flow
+            name: Toilet
+          - entity: sensor.water_tap_average_flow
+            name: Tap
+          - entity: sensor.water_other_average_flow
+            name: Other
+
+      - type: entities
+        title: Heat-pump boiler size
+        entities:
+          - entity: sensor.hot_water_peak_session
+            name: Largest hot water session (L at shower temp.)
+          - entity: sensor.hot_water_demand_per_day
+            name: Hot water per day (L at shower temp.)
+          - entity: sensor.heat_pump_boiler_required_size
+            name: Required tank (incl. margin)
+          - type: attribute
+            entity: sensor.heat_pump_boiler_required_size
+            attribute: standard_size
+            name: Standard size
+            suffix: L
+          - type: attribute
+            entity: sensor.heat_pump_boiler_required_size
+            attribute: reheat_hours
+            name: Full reheat time
+            suffix: h
+          - entity: input_number.wm_hot_peak_session_v40
+            name: Peak session (set 0 to restart)
+
+      - type: statistics-graph
+        title: Water per use type (L per day)
+        chart_type: bar
+        period: day
+        days_to_show: 30
+        stat_types:
+          - change
+        entities:
+          - entity: sensor.water_shower_total
+            name: Shower
+          - entity: sensor.water_toilet_total
+            name: Toilet
+          - entity: sensor.water_tap_total
+            name: Tap
+          - entity: sensor.water_other_total
+            name: Other
+
+      - type: statistics-graph
+        title: Gas per day (m³)
+        chart_type: bar
+        period: day
+        days_to_show: 30
+        stat_types:
+          - change
+        entities:
+          - entity: sensor.gas_meter_gas
+            name: All gas
+          - entity: sensor.gas_hot_water_total
+            name: Hot water draws
+          - entity: sensor.gas_shower_total
+            name: Showers
+
+      - type: entities
+        title: Heat-pump boiler comparison (per year, projected)
+        entities:
+          - entity: sensor.usage_tracking_days
+            name: Days tracked (projection from 7)
+          - entity: sensor.hot_water_gas_per_year
+            name: Hot water gas
+          - entity: sensor.hot_water_heat_per_year
+            name: Hot water heat
+          - entity: sensor.hot_water_gas_cost_per_year
+            name: Cost with gas
+          - entity: sensor.heat_pump_boiler_electricity_per_year
+            name: Heat-pump boiler electricity
+          - entity: input_number.wm_solar_share_year
+            name: Solar share, manual estimate (fallback)
+          - entity: sensor.water_meter_boiler_solar_share_year
+            name: Solar share, year simulation (nightly)
+          - type: attribute
+            entity: sensor.heat_pump_boiler_cost_per_year
+            attribute: solar_share_source
+            name: Solar share used
+          - entity: sensor.heat_pump_boiler_measured_solar_share
+            name: Solar share measured so far (virtual boiler)
+          - entity: sensor.heat_pump_boiler_cost_per_year
+            name: Cost with heat-pump boiler
+          - type: attribute
+            entity: sensor.heat_pump_boiler_cost_per_year
+            attribute: all_grid_cost
+            name: Same, without solar
+            prefix: "€ "
+          - entity: sensor.heat_pump_boiler_saving_per_year
+            name: Saving
+          - entity: sensor.heat_pump_boiler_payback
+            name: Payback
+          - entity: input_datetime.wm_usage_tracking_start
+            name: Tracking since
+
+      - type: markdown
+        title: Solar share per month (nightly simulation)
+        content: |
+          {% set e = 'sensor.water_meter_boiler_solar_share_year' %}
+          {% set months = state_attr(e, 'months') or [] %}
+          {% if months %}
+          | Month | Source | Solar | Solar kWh | Grid kWh |
+          |---|---|---:|---:|---:|
+          {% for m in months %}| {{ m.month }} | {{ m.source }} | {{ m.solar_share }} % | {{ m.solar_kwh }} | {{ m.grid_kwh }} |
+          {% endfor %}
+
+          Year: **{{ states(e) }} %** solar ({{ state_attr(e, 'solar_kwh') }} kWh solar,
+          {{ state_attr(e, 'grid_kwh') }} kWh grid), {{ state_attr(e, 'measured_months') }} month(s) measured,
+          demand {{ state_attr(e, 'heat_kwh_day') }} kWh heat/day. Last run {{ (state_attr(e, 'last_run') or '')[:16] }}.
+          {% for n in state_attr(e, 'notes') or [] %}
+          - {{ n }}
+          {% endfor %}
+          {% else %}
+          {{ state_attr(e, 'status') or 'Waiting for the first nightly run of the add-on.' }}
+          {{ state_attr(e, 'detail') or '' }}
+          {% endif %}
+
+      - type: entities
+        title: Usage settings
+        entities:
+          - entity: input_number.wm_gas_price
+          - entity: input_number.wm_electricity_price
+          - entity: input_number.wm_feed_in_price
+          - entity: input_number.wm_hp_boiler_investment
+          - entity: input_number.wm_hp_boiler_tank_l
+          - entity: input_number.wm_solar_tank_temp
+          - entity: input_number.wm_hp_boiler_cop
+          - entity: input_number.wm_hp_boiler_standby_kwh
+          - entity: input_number.wm_hp_boiler_heat_kw
+          - entity: input_number.wm_tank_temp
+          - entity: input_number.wm_tank_usable
+          - entity: input_number.wm_cold_water_temp
+          - entity: input_number.wm_shower_temp
+          - entity: input_number.wm_boiler_margin
+          - entity: input_number.wm_hot_session_gap_minutes
+          - entity: input_number.wm_combi_efficiency
+          - entity: input_number.wm_gas_kwh_per_m3
+          - entity: input_number.wm_gas_settle_minutes
+          - entity: binary_sensor.water_meter_drawing
+          - entity: sensor.gas_rate

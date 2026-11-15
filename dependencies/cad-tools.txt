@@ -1,0 +1,3 @@
+# Plotting/wiring helpers only. FreeCAD runs with its own bundled Python.
+matplotlib==3.11.2
+-c 'locks\cad-tools-windows.txt'

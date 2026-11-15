@@ -1,0 +1,717 @@
+substitutions:
+  device_name: presence-temperature-monitor
+  friendly_name: Presence Temperature Monitor
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    - priority: -100
+      then:
+        - delay: 2s
+        - script.execute:
+            id: radar_send
+            command: "get_all"
+
+esp32:
+  board: esp32-c3-devkitm-1
+  framework:
+    type: esp-idf
+
+logger:
+
+api:
+  encryption:
+    key: !secret api_key
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    encryption: {}
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "Presence-Monitor Fallback"
+    password: !secret ap_password
+
+captive_portal:
+
+web_server:
+  port: 80
+  version: 3
+  ota: false
+
+one_wire:
+  - platform: gpio
+    pin: GPIO0
+
+uart:
+  id: radar_uart
+  rx_pin: GPIO1
+  tx_pin: GPIO3
+  baud_rate: 115200
+  data_bits: 8
+  parity: NONE
+  stop_bits: 1
+  rx_buffer_size: 512
+  debug:
+    direction: RX
+    dummy_receiver: true
+    after:
+      delimiter: "\n"
+    sequence:
+      - lambda: |-
+          const std::string line(bytes.begin(), bytes.end());
+          const size_t first = line.find_first_not_of(" \t\r\n");
+          if (first == std::string::npos) return;
+          const size_t last = line.find_last_not_of(" \t\r\n");
+          const std::string message = line.substr(first, last - first + 1);
+
+          // Handles both "key=value" and the newer firmware's "key is value".
+          auto read_value = [&message](const char *key) -> float {
+            const size_t position = message.find(key);
+            if (position == std::string::npos) return NAN;
+            const char *p = message.c_str() + position + strlen(key);
+            while (*p == ' ') p++;
+            if (strncmp(p, "is", 2) == 0) p += 2;
+            while (*p == ' ' || *p == '=') p++;
+            char *end = nullptr;
+            const float value = strtof(p, &end);
+            return end == p ? NAN : value;
+          };
+
+          const bool moving = message.rfind("mov,", 0) == 0;
+          const bool still = message.rfind("occ,", 0) == 0;
+          if (!moving && !still) {
+            id(radar_last_message).publish_state(message);
+            const std::pair<const char *, number::Number *> settings[] = {
+              {"rmax", id(radar_max_range)},
+              {"mth1_mov", id(radar_mth1_mov)},
+              {"mth2_mov", id(radar_mth2_mov)},
+              {"mth3_mov", id(radar_mth3_mov)},
+              {"mth1_occ", id(radar_mth1_occ)},
+              {"mth2_occ", id(radar_mth2_occ)},
+              {"mth3_occ", id(radar_mth3_occ)},
+            };
+            for (const auto &setting : settings) {
+              const float value = read_value(setting.first);
+              if (!isnan(value)) setting.second->publish_state(value);
+            }
+            return;
+          }
+
+          const float distance = read_value("dis");
+          const float strength = read_value("str");
+          const bool has_strength = !isnan(strength);
+          if (id(radar_test_mode).state != has_strength) {
+            id(radar_test_mode).publish_state(has_strength);
+          }
+
+          // Raw readings are published before any filtering, for tuning.
+          const uint32_t now = millis();
+          id(radar_last_raw_ms) = now;
+          if (now - id(radar_last_raw_message_ms) >= 1000) {
+            id(radar_last_raw_message_ms) = now;
+            id(radar_last_message).publish_state(message);
+          }
+          if (!isnan(distance)) id(radar_distance).publish_state(distance);
+          if (has_strength) {
+            id(radar_signal_strength).publish_state(strength);
+            float &peak = moving ? id(radar_peak_mov) : id(radar_peak_occ);
+            if (strength > peak) peak = strength;
+            if (id(calib_active)) {
+              const bool far = !isnan(distance) && distance >= 2.8f;
+              float &calib_peak = moving ? (far ? id(calib_peak_mov2) : id(calib_peak_mov1))
+                                         : (far ? id(calib_peak_occ2) : id(calib_peak_occ1));
+              if (strength > calib_peak) calib_peak = strength;
+            }
+          }
+
+          if (!isnan(distance)) {
+            if (distance < id(radar_min_distance).state) return;
+            const float ignore_start = id(radar_ignore_start).state;
+            const float ignore_end = id(radar_ignore_end).state;
+            if (ignore_end > ignore_start && distance >= ignore_start && distance <= ignore_end) return;
+          }
+
+          // Require several reports in a short window before leaving "Clear".
+          if (id(radar_last_report_ms) == 0) {
+            if (now - id(radar_confirm_start_ms) > 2000) {
+              id(radar_confirm_start_ms) = now;
+              id(radar_confirm_count) = 0;
+            }
+            if (++id(radar_confirm_count) < (int) id(presence_confirm_reports).state) return;
+            id(radar_confirm_count) = 0;
+          }
+
+          id(radar_last_report_ms) = now;
+          if (moving) id(radar_last_motion_ms) = now;
+          if (!isnan(distance)) {
+            const float z1_start = id(zone1_start).state, z1_end = id(zone1_end).state;
+            const float z2_start = id(zone2_start).state, z2_end = id(zone2_end).state;
+            if (z1_end > z1_start && distance >= z1_start && distance <= z1_end) id(radar_zone1_last_ms) = now;
+            if (z2_end > z2_start && distance >= z2_start && distance <= z2_end) id(radar_zone2_last_ms) = now;
+          }
+          id(radar_evaluate).execute();
+
+globals:
+  - id: radar_last_report_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: radar_last_motion_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: radar_zone1_last_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: radar_zone2_last_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: radar_confirm_start_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: radar_confirm_count
+    type: int
+    restore_value: no
+    initial_value: "0"
+  - id: radar_last_raw_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: radar_last_raw_message_ms
+    type: uint32_t
+    restore_value: no
+    initial_value: "0"
+  - id: radar_peak_mov
+    type: float
+    restore_value: no
+    initial_value: "0"
+  - id: radar_peak_occ
+    type: float
+    restore_value: no
+    initial_value: "0"
+  - id: calib_active
+    type: bool
+    restore_value: no
+    initial_value: "false"
+  - id: calib_peak_mov1
+    type: float
+    restore_value: no
+    initial_value: "0"
+  - id: calib_peak_mov2
+    type: float
+    restore_value: no
+    initial_value: "0"
+  - id: calib_peak_occ1
+    type: float
+    restore_value: no
+    initial_value: "0"
+  - id: calib_peak_occ2
+    type: float
+    restore_value: no
+    initial_value: "0"
+
+script:
+  - id: radar_send
+    mode: queued
+    max_runs: 10
+    parameters:
+      command: string
+    then:
+      - uart.write:
+          id: radar_uart
+          data: !lambda |-
+            const std::string line = command + "\r\n";
+            return std::vector<uint8_t>(line.begin(), line.end());
+      - delay: 150ms
+  - id: radar_evaluate
+    then:
+      - lambda: |-
+          const uint32_t now = millis();
+          auto active = [now](uint32_t last, float seconds) {
+            if (last == 0 || isnan(seconds)) return false;
+            return (now - last) <= (uint32_t) (seconds * 1000.0f);
+          };
+          const float clear_delay = id(presence_clear_delay).state;
+          const bool presence = active(id(radar_last_report_ms), clear_delay);
+          const bool motion = presence && active(id(radar_last_motion_ms), id(motion_hold_time).state);
+          const bool zone1 = presence && active(id(radar_zone1_last_ms), clear_delay);
+          const bool zone2 = presence && active(id(radar_zone2_last_ms), clear_delay);
+          if (!presence) {
+            id(radar_last_report_ms) = 0;
+            id(radar_last_motion_ms) = 0;
+            id(radar_zone1_last_ms) = 0;
+            id(radar_zone2_last_ms) = 0;
+          }
+          if (id(radar_last_raw_ms) != 0 && now - id(radar_last_raw_ms) > 2000) {
+            id(radar_last_raw_ms) = 0;
+            id(radar_distance).publish_state(NAN);
+            id(radar_signal_strength).publish_state(NAN);
+          }
+          id(radar_presence).publish_state(presence);
+          id(radar_motion).publish_state(motion);
+          id(radar_quiet_presence).publish_state(presence && !motion);
+          id(radar_zone1).publish_state(zone1);
+          id(radar_zone2).publish_state(zone2);
+          const std::string state = !presence ? "Clear" : (motion ? "Movement" : "Still");
+          if (id(radar_state).state != state) id(radar_state).publish_state(state);
+
+  - id: radar_calibrate
+    mode: single
+    then:
+      - text_sensor.template.publish:
+          id: calibration_status
+          state: "Leave the room now - measuring starts in 20 s"
+      - script.execute: {id: radar_send, command: "test_mode=1"}
+      # Low thresholds so the radar reports everything it sees in the empty room.
+      - script.execute: {id: radar_send, command: "mth1_mov=30"}
+      - script.execute: {id: radar_send, command: "mth2_mov=30"}
+      - script.execute: {id: radar_send, command: "mth1_occ=30"}
+      - script.execute: {id: radar_send, command: "mth2_occ=30"}
+      - delay: 20s
+      - lambda: |-
+          id(calib_peak_mov1) = 0;
+          id(calib_peak_mov2) = 0;
+          id(calib_peak_occ1) = 0;
+          id(calib_peak_occ2) = 0;
+          id(calib_active) = true;
+      - text_sensor.template.publish:
+          id: calibration_status
+          state: "Measuring the empty room - stay out"
+      - delay: !lambda "return (uint32_t) (id(calibration_time).state * 1000.0f);"
+      - lambda: |-
+          id(calib_active) = false;
+          const float factor = 1.0f + id(calibration_margin).state / 100.0f;
+          auto threshold = [factor](float peak) { return std::max(ceilf(peak * factor), 40.0f); };
+          const float mov1 = threshold(id(calib_peak_mov1)), mov2 = threshold(id(calib_peak_mov2));
+          const float occ1 = threshold(id(calib_peak_occ1)), occ2 = threshold(id(calib_peak_occ2));
+          id(radar_send).execute(str_sprintf("mth1_mov=%.0f", mov1));
+          id(radar_send).execute(str_sprintf("mth2_mov=%.0f", mov2));
+          id(radar_send).execute(str_sprintf("mth1_occ=%.0f", occ1));
+          id(radar_send).execute(str_sprintf("mth2_occ=%.0f", occ2));
+          id(radar_send).execute(std::string("save"));
+          id(radar_send).execute(std::string("get_all"));
+          id(calibration_status).publish_state(str_sprintf(
+              "Done and saved. Empty-room peaks mov %.0f/%.0f, still %.0f/%.0f",
+              id(calib_peak_mov1), id(calib_peak_mov2), id(calib_peak_occ1), id(calib_peak_occ2)));
+
+interval:
+  - interval: 1s
+    then:
+      - script.execute: radar_evaluate
+  - interval: 10s
+    then:
+      - lambda: |-
+          id(radar_peak_mov_strength).publish_state(id(radar_peak_mov));
+          id(radar_peak_occ_strength).publish_state(id(radar_peak_occ));
+          id(radar_peak_mov) = 0;
+          id(radar_peak_occ) = 0;
+
+sensor:
+  - platform: dallas_temp
+    name: Room Temperature (uncorrected)
+    id: room_temperature_raw
+    index: 0
+    update_interval: 30s
+    accuracy_decimals: 2
+    entity_category: diagnostic
+    on_value:
+      - component.update: room_temperature
+  - platform: template
+    name: Room Temperature
+    id: room_temperature
+    unit_of_measurement: °C
+    device_class: temperature
+    state_class: measurement
+    accuracy_decimals: 1
+    update_interval: never
+    lambda: |-
+      const float raw = id(room_temperature_raw).state;
+      if (isnan(raw)) return NAN;
+      return raw + id(temperature_offset).state;
+  - platform: template
+    name: Radar Target Distance
+    id: radar_distance
+    unit_of_measurement: m
+    device_class: distance
+    state_class: measurement
+    accuracy_decimals: 2
+    filters:
+      - throttle: 1s
+  - platform: template
+    name: Radar Signal Strength
+    id: radar_signal_strength
+    state_class: measurement
+    accuracy_decimals: 0
+    filters:
+      - throttle: 1s
+  - platform: template
+    name: Radar Peak Movement Strength
+    id: radar_peak_mov_strength
+    state_class: measurement
+    accuracy_decimals: 0
+  - platform: template
+    name: Radar Peak Still Strength
+    id: radar_peak_occ_strength
+    state_class: measurement
+    accuracy_decimals: 0
+
+binary_sensor:
+  - platform: template
+    name: Presence
+    id: radar_presence
+    device_class: occupancy
+  - platform: template
+    name: Quiet Presence
+    id: radar_quiet_presence
+    device_class: occupancy
+  - platform: template
+    name: Radar Motion
+    id: radar_motion
+    device_class: motion
+  - platform: template
+    name: Zone 1 Presence
+    id: radar_zone1
+    device_class: occupancy
+  - platform: template
+    name: Zone 2 Presence
+    id: radar_zone2
+    device_class: occupancy
+
+text_sensor:
+  - platform: template
+    name: Radar State
+    id: radar_state
+  - platform: template
+    name: Radar Last Message
+    id: radar_last_message
+    entity_category: diagnostic
+  - platform: template
+    name: Calibration Status
+    id: calibration_status
+
+text:
+  - platform: template
+    name: Radar Command
+    id: radar_command
+    mode: text
+    max_length: 40
+    optimistic: true
+    entity_category: config
+    set_action:
+      - script.execute:
+          id: radar_send
+          command: !lambda return x;
+
+switch:
+  - platform: template
+    name: Radar Test Mode
+    id: radar_test_mode
+    optimistic: true
+    entity_category: config
+    turn_on_action:
+      - script.execute:
+          id: radar_send
+          command: "test_mode=1"
+    turn_off_action:
+      - script.execute:
+          id: radar_send
+          command: "test_mode=0"
+
+button:
+  - platform: template
+    name: Calibrate Empty Room
+    on_press:
+      - script.execute: radar_calibrate
+  - platform: template
+    name: Read Radar Settings
+    entity_category: config
+    on_press:
+      - script.execute:
+          id: radar_send
+          command: "get_all"
+  - platform: template
+    name: Save Radar Settings
+    entity_category: config
+    on_press:
+      - script.execute:
+          id: radar_send
+          command: "save"
+      - script.execute:
+          id: radar_send
+          command: "get_all"
+
+number:
+  # Settings stored in the radar itself; values shown are read back from the radar.
+  - platform: template
+    name: Radar Maximum Range
+    id: radar_max_range
+    unit_of_measurement: m
+    min_value: 0.4
+    max_value: 10.0
+    step: 0.1
+    mode: box
+    entity_category: config
+    set_action:
+      - script.execute:
+          id: radar_send
+          command: !lambda 'return str_sprintf("rmax=%.1f", x);'
+      - script.execute:
+          id: radar_send
+          command: "get_all"
+  - platform: template
+    name: Radar Movement Threshold 0-2.8 m
+    id: radar_mth1_mov
+    min_value: 0
+    max_value: 1000
+    step: 1
+    mode: box
+    entity_category: config
+    set_action:
+      - script.execute:
+          id: radar_send
+          command: !lambda 'return str_sprintf("mth1_mov=%.0f", x);'
+      - script.execute:
+          id: radar_send
+          command: "get_all"
+  - platform: template
+    name: Radar Movement Threshold 2.8-8 m
+    id: radar_mth2_mov
+    min_value: 0
+    max_value: 1000
+    step: 1
+    mode: box
+    entity_category: config
+    set_action:
+      - script.execute:
+          id: radar_send
+          command: !lambda 'return str_sprintf("mth2_mov=%.0f", x);'
+      - script.execute:
+          id: radar_send
+          command: "get_all"
+  - platform: template
+    name: Radar Movement Threshold over 8 m
+    id: radar_mth3_mov
+    min_value: 0
+    max_value: 1000
+    step: 1
+    mode: box
+    entity_category: config
+    set_action:
+      - script.execute:
+          id: radar_send
+          command: !lambda 'return str_sprintf("mth3_mov=%.0f", x);'
+      - script.execute:
+          id: radar_send
+          command: "get_all"
+  - platform: template
+    name: Radar Still Threshold 0-2.8 m
+    id: radar_mth1_occ
+    min_value: 0
+    max_value: 1000
+    step: 1
+    mode: box
+    entity_category: config
+    set_action:
+      - script.execute:
+          id: radar_send
+          command: !lambda 'return str_sprintf("mth1_occ=%.0f", x);'
+      - script.execute:
+          id: radar_send
+          command: "get_all"
+  - platform: template
+    name: Radar Still Threshold 2.8-8 m
+    id: radar_mth2_occ
+    min_value: 0
+    max_value: 1000
+    step: 1
+    mode: box
+    entity_category: config
+    set_action:
+      - script.execute:
+          id: radar_send
+          command: !lambda 'return str_sprintf("mth2_occ=%.0f", x);'
+      - script.execute:
+          id: radar_send
+          command: "get_all"
+  - platform: template
+    name: Radar Still Threshold over 8 m
+    id: radar_mth3_occ
+    min_value: 0
+    max_value: 1000
+    step: 1
+    mode: box
+    entity_category: config
+    set_action:
+      - script.execute:
+          id: radar_send
+          command: !lambda 'return str_sprintf("mth3_occ=%.0f", x);'
+      - script.execute:
+          id: radar_send
+          command: "get_all"
+
+  # Filtering done on the ESP; stored in ESP flash.
+  - platform: template
+    name: Presence Clear Delay
+    id: presence_clear_delay
+    unit_of_measurement: s
+    min_value: 1
+    max_value: 600
+    step: 1
+    initial_value: 30
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+  - platform: template
+    name: Movement Hold Time
+    id: motion_hold_time
+    unit_of_measurement: s
+    min_value: 1
+    max_value: 120
+    step: 1
+    initial_value: 5
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+  - platform: template
+    name: Presence Confirm Reports
+    id: presence_confirm_reports
+    min_value: 1
+    max_value: 15
+    step: 1
+    initial_value: 5
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+  - platform: template
+    name: Minimum Detection Distance
+    id: radar_min_distance
+    unit_of_measurement: m
+    min_value: 0
+    max_value: 8
+    step: 0.05
+    initial_value: 0
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+  - platform: template
+    name: Ignore Zone Start
+    id: radar_ignore_start
+    unit_of_measurement: m
+    min_value: 0
+    max_value: 10
+    step: 0.05
+    initial_value: 0
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+  - platform: template
+    name: Ignore Zone End
+    id: radar_ignore_end
+    unit_of_measurement: m
+    min_value: 0
+    max_value: 10
+    step: 0.05
+    initial_value: 0
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+  - platform: template
+    name: Zone 1 Start
+    id: zone1_start
+    unit_of_measurement: m
+    min_value: 0
+    max_value: 10
+    step: 0.05
+    initial_value: 0
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+  - platform: template
+    name: Zone 1 End
+    id: zone1_end
+    unit_of_measurement: m
+    min_value: 0
+    max_value: 10
+    step: 0.05
+    initial_value: 0
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+  - platform: template
+    name: Zone 2 Start
+    id: zone2_start
+    unit_of_measurement: m
+    min_value: 0
+    max_value: 10
+    step: 0.05
+    initial_value: 0
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+  - platform: template
+    name: Zone 2 End
+    id: zone2_end
+    unit_of_measurement: m
+    min_value: 0
+    max_value: 10
+    step: 0.05
+    initial_value: 0
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+  - platform: template
+    name: Calibration Time
+    id: calibration_time
+    unit_of_measurement: s
+    min_value: 10
+    max_value: 600
+    step: 10
+    initial_value: 60
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+  - platform: template
+    name: Calibration Margin
+    id: calibration_margin
+    unit_of_measurement: "%"
+    min_value: 0
+    max_value: 200
+    step: 5
+    initial_value: 25
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+  - platform: template
+    name: Temperature Offset
+    id: temperature_offset
+    unit_of_measurement: °C
+    min_value: -10
+    max_value: 10
+    step: 0.1
+    initial_value: 0
+    restore_value: true
+    optimistic: true
+    mode: box
+    entity_category: config
+    on_value:
+      - component.update: room_temperature

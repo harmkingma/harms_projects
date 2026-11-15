@@ -1,0 +1,1044 @@
+(kicad_sch
+    (version 20250610)
+    (generator "eeschema")
+    (generator_version "10.0")
+    (uuid "a1000000-0000-4000-8000-000000000001")
+    (paper "A4")
+    (title_block
+        (title "ESP32-C3 Presence and Temperature Wiring")
+        (date "2026-11-07")
+        (rev "1.0")
+        (company "ESPHome device")
+    )
+    (lib_symbols
+(symbol "Connector_Generic:Conn_01x06"
+		(pin_names
+			(offset 1.016)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(duplicate_pin_numbers_are_jumpers no)
+		(property "Reference" "J"
+			(at 0 7.62 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "Conn_01x06"
+			(at 0 -10.16 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Generic connector, single row, 01x06, script generated (kicad-library-utils/schlib/autogen/connector/)"
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "ki_keywords" "connector"
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "ki_fp_filters" "Connector*:*_1x??_*"
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(symbol "Conn_01x06_1_1"
+			(rectangle
+				(start -1.27 6.35)
+				(end 1.27 -8.89)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type background)
+				)
+			)
+			(rectangle
+				(start -1.27 5.207)
+				(end 0 4.953)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(rectangle
+				(start -1.27 2.667)
+				(end 0 2.413)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(rectangle
+				(start -1.27 0.127)
+				(end 0 -0.127)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(rectangle
+				(start -1.27 -2.413)
+				(end 0 -2.667)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(rectangle
+				(start -1.27 -4.953)
+				(end 0 -5.207)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(rectangle
+				(start -1.27 -7.493)
+				(end 0 -7.747)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(pin passive line
+				(at -5.08 5.08 0)
+				(length 3.81)
+				(name "Pin_1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at -5.08 2.54 0)
+				(length 3.81)
+				(name "Pin_2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at -5.08 0 0)
+				(length 3.81)
+				(name "Pin_3"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "3"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at -5.08 -2.54 0)
+				(length 3.81)
+				(name "Pin_4"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "4"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at -5.08 -5.08 0)
+				(length 3.81)
+				(name "Pin_5"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "5"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at -5.08 -7.62 0)
+				(length 3.81)
+				(name "Pin_6"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "6"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+(symbol "Connector_Generic:Conn_01x04"
+		(pin_names
+			(offset 1.016)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(duplicate_pin_numbers_are_jumpers no)
+		(property "Reference" "J"
+			(at 0 5.08 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "Conn_01x04"
+			(at 0 -7.62 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Generic connector, single row, 01x04, script generated (kicad-library-utils/schlib/autogen/connector/)"
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "ki_keywords" "connector"
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "ki_fp_filters" "Connector*:*_1x??_*"
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(symbol "Conn_01x04_1_1"
+			(rectangle
+				(start -1.27 3.81)
+				(end 1.27 -6.35)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type background)
+				)
+			)
+			(rectangle
+				(start -1.27 2.667)
+				(end 0 2.413)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(rectangle
+				(start -1.27 0.127)
+				(end 0 -0.127)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(rectangle
+				(start -1.27 -2.413)
+				(end 0 -2.667)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(rectangle
+				(start -1.27 -4.953)
+				(end 0 -5.207)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(pin passive line
+				(at -5.08 2.54 0)
+				(length 3.81)
+				(name "Pin_1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at -5.08 0 0)
+				(length 3.81)
+				(name "Pin_2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at -5.08 -2.54 0)
+				(length 3.81)
+				(name "Pin_3"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "3"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at -5.08 -5.08 0)
+				(length 3.81)
+				(name "Pin_4"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "4"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+(symbol "Connector_Generic:Conn_01x03"
+		(pin_names
+			(offset 1.016)
+			(hide yes)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(duplicate_pin_numbers_are_jumpers no)
+		(property "Reference" "J"
+			(at 0 5.08 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "Conn_01x03"
+			(at 0 -5.08 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Generic connector, single row, 01x03, script generated (kicad-library-utils/schlib/autogen/connector/)"
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "ki_keywords" "connector"
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "ki_fp_filters" "Connector*:*_1x??_*"
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(symbol "Conn_01x03_1_1"
+			(rectangle
+				(start -1.27 3.81)
+				(end 1.27 -3.81)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type background)
+				)
+			)
+			(rectangle
+				(start -1.27 2.667)
+				(end 0 2.413)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(rectangle
+				(start -1.27 0.127)
+				(end 0 -0.127)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(rectangle
+				(start -1.27 -2.413)
+				(end 0 -2.667)
+				(stroke
+					(width 0.1524)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+			(pin passive line
+				(at -5.08 2.54 0)
+				(length 3.81)
+				(name "Pin_1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at -5.08 0 0)
+				(length 3.81)
+				(name "Pin_2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at -5.08 -2.54 0)
+				(length 3.81)
+				(name "Pin_3"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "3"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+(symbol "Device:R"
+		(pin_numbers
+			(hide yes)
+		)
+		(pin_names
+			(offset 0)
+		)
+		(exclude_from_sim no)
+		(in_bom yes)
+		(on_board yes)
+		(in_pos_files yes)
+		(duplicate_pin_numbers_are_jumpers no)
+		(property "Reference" "R"
+			(at 2.032 0 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Value" "R"
+			(at 0 0 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Footprint" ""
+			(at -1.778 0 90)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Datasheet" ""
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "Description" "Resistor"
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "ki_keywords" "R res resistor"
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "ki_fp_filters" "R_*"
+			(at 0 0 0)
+			(show_name no)
+			(do_not_autoplace no)
+			(hide yes)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(symbol "R_0_1"
+			(rectangle
+				(start -1.016 -2.54)
+				(end 1.016 2.54)
+				(stroke
+					(width 0.254)
+					(type default)
+				)
+				(fill
+					(type none)
+				)
+			)
+		)
+		(symbol "R_1_1"
+			(pin passive line
+				(at 0 3.81 270)
+				(length 1.27)
+				(name ""
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "1"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+			(pin passive line
+				(at 0 -3.81 90)
+				(length 1.27)
+				(name ""
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+				(number "2"
+					(effects
+						(font
+							(size 1.27 1.27)
+						)
+					)
+				)
+			)
+		)
+		(embedded_fonts no)
+	)
+    )    (symbol
+        (lib_id "Connector_Generic:Conn_01x06")
+        (at 83.00 93.00 0)
+        (unit 1)
+        (exclude_from_sim no)
+        (in_bom no)
+        (on_board yes)
+        (dnp no)
+        (uuid "a1000000-0000-4000-8000-000000000008")
+        (property "Reference" "J1" (at 83.00 78.00 0)
+            (effects (font (size 1.27 1.27)) (justify left bottom))
+        )        (property "Value" "ESP32-C3 SuperMini Plus logical pin map" (at 83.00 80.50 0)
+            (effects (font (size 1.27 1.27)) (justify left bottom))
+        )        (property "Footprint" "" (at 83.00 93.00 0)
+            (hide yes)
+            (effects (font (size 1.27 1.27)) (justify left bottom))
+        )        (property "Datasheet" "" (at 83.00 93.00 0)
+            (hide yes)
+            (effects (font (size 1.27 1.27)) (justify left bottom))
+        )        (pin "1" (uuid "a1000000-0000-4000-8000-000000000002"))
+        (pin "2" (uuid "a1000000-0000-4000-8000-000000000003"))
+        (pin "3" (uuid "a1000000-0000-4000-8000-000000000004"))
+        (pin "4" (uuid "a1000000-0000-4000-8000-000000000005"))
+        (pin "5" (uuid "a1000000-0000-4000-8000-000000000006"))
+        (pin "6" (uuid "a1000000-0000-4000-8000-000000000007"))
+        (instances (project "presence_wiring"
+            (path "/a1000000-0000-4000-8000-000000000001" (reference "J1" ) (unit 1))
+        ))
+    )    (wire (pts (xy 77.92 87.92) (xy 72.84 87.92))
+        (stroke (width 0) (type default))
+        (uuid "a1000000-0000-4000-8000-000000000009")
+    )    (label "+5V" (at 72.84 87.92 180)
+        (effects (font (size 1.27 1.27)) (justify right bottom))
+        (uuid "a1000000-0000-4000-8000-000000000010")
+    )    (wire (pts (xy 77.92 90.46) (xy 72.84 90.46))
+        (stroke (width 0) (type default))
+        (uuid "a1000000-0000-4000-8000-000000000011")
+    )    (label "+3V3" (at 72.84 90.46 180)
+        (effects (font (size 1.27 1.27)) (justify right bottom))
+        (uuid "a1000000-0000-4000-8000-000000000012")
+    )    (wire (pts (xy 77.92 93.00) (xy 72.84 93.00))
+        (stroke (width 0) (type default))
+        (uuid "a1000000-0000-4000-8000-000000000013")
+    )    (label "GND" (at 72.84 93.00 180)
+        (effects (font (size 1.27 1.27)) (justify right bottom))
+        (uuid "a1000000-0000-4000-8000-000000000014")
+    )    (wire (pts (xy 77.92 95.54) (xy 72.84 95.54))
+        (stroke (width 0) (type default))
+        (uuid "a1000000-0000-4000-8000-000000000015")
+    )    (label "ONEWIRE_DQ" (at 72.84 95.54 180)
+        (effects (font (size 1.27 1.27)) (justify right bottom))
+        (uuid "a1000000-0000-4000-8000-000000000016")
+    )    (wire (pts (xy 77.92 98.08) (xy 72.84 98.08))
+        (stroke (width 0) (type default))
+        (uuid "a1000000-0000-4000-8000-000000000017")
+    )    (label "RADAR_TX" (at 72.84 98.08 180)
+        (effects (font (size 1.27 1.27)) (justify right bottom))
+        (uuid "a1000000-0000-4000-8000-000000000018")
+    )    (wire (pts (xy 77.92 100.62) (xy 72.84 100.62))
+        (stroke (width 0) (type default))
+        (uuid "a1000000-0000-4000-8000-000000000019")
+    )    (label "RADAR_RX" (at 72.84 100.62 180)
+        (effects (font (size 1.27 1.27)) (justify right bottom))
+        (uuid "a1000000-0000-4000-8000-000000000020")
+    )    (symbol
+        (lib_id "Connector_Generic:Conn_01x04")
+        (at 215.00 75.00 0)
+        (unit 1)
+        (exclude_from_sim no)
+        (in_bom no)
+        (on_board yes)
+        (dnp no)
+        (uuid "a1000000-0000-4000-8000-000000000025")
+        (property "Reference" "J2" (at 215.00 64.00 0)
+            (effects (font (size 1.27 1.27)) (justify left bottom))
+        )        (property "Value" "HLK-LD1125H-24G logical pin map" (at 215.00 66.50 0)
+            (effects (font (size 1.27 1.27)) (justify left bottom))
+        )        (property "Footprint" "" (at 215.00 75.00 0)
+            (hide yes)
+            (effects (font (size 1.27 1.27)) (justify left bottom))
+        )        (property "Datasheet" "" (at 215.00 75.00 0)
+            (hide yes)
+            (effects (font (size 1.27 1.27)) (justify left bottom))
+        )        (pin "1" (uuid "a1000000-0000-4000-8000-000000000021"))
+        (pin "2" (uuid "a1000000-0000-4000-8000-000000000022"))
+        (pin "3" (uuid "a1000000-0000-4000-8000-000000000023"))
+        (pin "4" (uuid "a1000000-0000-4000-8000-000000000024"))
+        (instances (project "presence_wiring"
+            (path "/a1000000-0000-4000-8000-000000000001" (reference "J2" ) (unit 1))
+        ))
+    )    (wire (pts (xy 209.92 72.46) (xy 204.84 72.46))
+        (stroke (width 0) (type default))
+        (uuid "a1000000-0000-4000-8000-000000000026")
+    )    (label "+5V" (at 204.84 72.46 180)
+        (effects (font (size 1.27 1.27)) (justify right bottom))
+        (uuid "a1000000-0000-4000-8000-000000000027")
+    )    (wire (pts (xy 209.92 75.00) (xy 204.84 75.00))
+        (stroke (width 0) (type default))
+        (uuid "a1000000-0000-4000-8000-000000000028")
+    )    (label "GND" (at 204.84 75.00 180)
+        (effects (font (size 1.27 1.27)) (justify right bottom))
+        (uuid "a1000000-0000-4000-8000-000000000029")
+    )    (wire (pts (xy 209.92 77.54) (xy 204.84 77.54))
+        (stroke (width 0) (type default))
+        (uuid "a1000000-0000-4000-8000-000000000030")
+    )    (label "RADAR_RX" (at 204.84 77.54 180)
+        (effects (font (size 1.27 1.27)) (justify right bottom))
+        (uuid "a1000000-0000-4000-8000-000000000031")
+    )    (wire (pts (xy 209.92 80.08) (xy 204.84 80.08))
+        (stroke (width 0) (type default))
+        (uuid "a1000000-0000-4000-8000-000000000032")
+    )    (label "RADAR_TX" (at 204.84 80.08 180)
+        (effects (font (size 1.27 1.27)) (justify right bottom))
+        (uuid "a1000000-0000-4000-8000-000000000033")
+    )    (symbol
+        (lib_id "Connector_Generic:Conn_01x03")
+        (at 215.00 132.00 0)
+        (unit 1)
+        (exclude_from_sim no)
+        (in_bom no)
+        (on_board yes)
+        (dnp no)
+        (uuid "a1000000-0000-4000-8000-000000000037")
+        (property "Reference" "J3" (at 215.00 121.00 0)
+            (effects (font (size 1.27 1.27)) (justify left bottom))
+        )        (property "Value" "DS18B20 TO-92 pin map" (at 215.00 123.50 0)
+            (effects (font (size 1.27 1.27)) (justify left bottom))
+        )        (property "Footprint" "" (at 215.00 132.00 0)
+            (hide yes)
+            (effects (font (size 1.27 1.27)) (justify left bottom))
+        )        (property "Datasheet" "" (at 215.00 132.00 0)
+            (hide yes)
+            (effects (font (size 1.27 1.27)) (justify left bottom))
+        )        (pin "1" (uuid "a1000000-0000-4000-8000-000000000034"))
+        (pin "2" (uuid "a1000000-0000-4000-8000-000000000035"))
+        (pin "3" (uuid "a1000000-0000-4000-8000-000000000036"))
+        (instances (project "presence_wiring"
+            (path "/a1000000-0000-4000-8000-000000000001" (reference "J3" ) (unit 1))
+        ))
+    )    (wire (pts (xy 209.92 129.46) (xy 204.84 129.46))
+        (stroke (width 0) (type default))
+        (uuid "a1000000-0000-4000-8000-000000000038")
+    )    (label "GND" (at 204.84 129.46 180)
+        (effects (font (size 1.27 1.27)) (justify right bottom))
+        (uuid "a1000000-0000-4000-8000-000000000039")
+    )    (wire (pts (xy 209.92 132.00) (xy 204.84 132.00))
+        (stroke (width 0) (type default))
+        (uuid "a1000000-0000-4000-8000-000000000040")
+    )    (label "ONEWIRE_DQ" (at 204.84 132.00 180)
+        (effects (font (size 1.27 1.27)) (justify right bottom))
+        (uuid "a1000000-0000-4000-8000-000000000041")
+    )    (wire (pts (xy 209.92 134.54) (xy 204.84 134.54))
+        (stroke (width 0) (type default))
+        (uuid "a1000000-0000-4000-8000-000000000042")
+    )    (label "+3V3" (at 204.84 134.54 180)
+        (effects (font (size 1.27 1.27)) (justify right bottom))
+        (uuid "a1000000-0000-4000-8000-000000000043")
+    )    (symbol
+        (lib_id "Device:R")
+        (at 155.00 132.00 0)
+        (unit 1)
+        (exclude_from_sim no)
+        (in_bom no)
+        (on_board yes)
+        (dnp no)
+        (uuid "a1000000-0000-4000-8000-000000000046")
+        (property "Reference" "R1" (at 160.00 128.00 0)
+            (effects (font (size 1.27 1.27)) (justify left bottom))
+        )        (property "Value" "4.7k" (at 160.00 130.50 0)
+            (effects (font (size 1.27 1.27)) (justify left bottom))
+        )        (property "Footprint" "" (at 155.00 132.00 0)
+            (hide yes)
+            (effects (font (size 1.27 1.27)) (justify left bottom))
+        )        (property "Datasheet" "" (at 155.00 132.00 0)
+            (hide yes)
+            (effects (font (size 1.27 1.27)) (justify left bottom))
+        )        (pin "1" (uuid "a1000000-0000-4000-8000-000000000044"))
+        (pin "2" (uuid "a1000000-0000-4000-8000-000000000045"))
+        (instances (project "presence_wiring"
+            (path "/a1000000-0000-4000-8000-000000000001" (reference "R1" ) (unit 1))
+        ))
+    )    (wire (pts (xy 155.00 128.19) (xy 155.00 123.11))
+        (stroke (width 0) (type default))
+        (uuid "a1000000-0000-4000-8000-000000000047")
+    )    (label "+3V3" (at 155.00 123.11 0)
+        (effects (font (size 1.27 1.27)) (justify left bottom))
+        (uuid "a1000000-0000-4000-8000-000000000048")
+    )    (wire (pts (xy 155.00 135.81) (xy 155.00 140.89))
+        (stroke (width 0) (type default))
+        (uuid "a1000000-0000-4000-8000-000000000049")
+    )    (label "ONEWIRE_DQ" (at 155.00 140.89 0)
+        (effects (font (size 1.27 1.27)) (justify left bottom))
+        (uuid "a1000000-0000-4000-8000-000000000050")
+    )    (text "USB-C cable plugs directly into U1; its 5V pad supplies the radar." (at 32.00 158.00 0)
+        (effects (font (size 1.1 1.1)) (justify left bottom))
+        (uuid "a1000000-0000-4000-8000-000000000051")
+    )    (text "Radar: 5V supply, common GND, 3.3V TTL UART at 115200 baud, 8N1." (at 32.00 162.00 0)
+        (effects (font (size 1.1 1.1)) (justify left bottom))
+        (uuid "a1000000-0000-4000-8000-000000000052")
+    )    (text "J1-J3 use generic pin numbering as logical maps; solder by signal labels/pad markings, not connector position." (at 32.00 166.00 0)
+        (effects (font (size 1.1 1.1)) (justify left bottom))
+        (uuid "a1000000-0000-4000-8000-000000000053")
+    )    (text "DS18B20, flat marked face toward you and leads down: pin 1=GND, pin 2=DQ, pin 3=VDD." (at 32.00 170.00 0)
+        (effects (font (size 1.1 1.1)) (justify left bottom))
+        (uuid "a1000000-0000-4000-8000-000000000054")
+    )    (text "ESPHome pin map: GPIO0=1-Wire; GPIO1=UART RX from radar TX; GPIO3=UART TX to radar RX." (at 32.00 174.00 0)
+        (effects (font (size 1.1 1.1)) (justify left bottom))
+        (uuid "a1000000-0000-4000-8000-000000000055")
+    )    (text "R1 is the required 4.7k pull-up between DQ and 3V3. Do not connect any 5V signal to GPIO." (at 32.00 178.00 0)
+        (effects (font (size 1.1 1.1)) (justify left bottom))
+        (uuid "a1000000-0000-4000-8000-000000000056")
+    )    (embedded_fonts no)
+    (sheet_instances (path "/" (page "1")))
+)

@@ -1,0 +1,102 @@
+# Phase 1: verify ESP32-CAM (AI-Thinker) board, PSRAM, status LED and flash LED.
+# Flash: esphome run esphome/step1-board-test.yaml --device COM49
+
+esphome:
+  name: espcam-water
+  friendly_name: ESPCam Water
+  on_boot:
+    priority: -100
+    then:
+      - light.turn_on:
+          id: flash_led
+          brightness: 30%
+      - delay: 300ms
+      - light.turn_off: flash_led
+
+esp32:
+  board: esp32cam
+  framework:
+    type: esp-idf
+
+psram:
+
+logger:
+  baud_rate: 115200
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    # Reuses the api encryption key.
+    encryption:
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "ESPCam-Water Fallback"
+    password: !secret fallback_ap_password
+
+captive_portal:
+
+web_server:
+  port: 80
+  version: 3
+  # Firmware updates only via encrypted native OTA (captive portal keeps its own).
+  ota: false
+
+debug:
+  update_interval: 10s
+
+output:
+  # Flash LED; channel 2 keeps LEDC channel 0 free for the camera XCLK later.
+  - platform: ledc
+    pin: GPIO4
+    id: flash_pwm
+    channel: 2
+    frequency: 1000Hz
+  - platform: gpio
+    id: status_led_out
+    pin:
+      number: GPIO33
+      inverted: true
+
+light:
+  - platform: monochromatic
+    output: flash_pwm
+    id: flash_led
+    name: Flash LED
+    default_transition_length: 0s
+    restore_mode: ALWAYS_OFF
+
+interval:
+  - interval: 1s
+    then:
+      - output.turn_on: status_led_out
+      - delay: 100ms
+      - output.turn_off: status_led_out
+
+sensor:
+  - platform: wifi_signal
+    name: WiFi RSSI
+    update_interval: 30s
+  - platform: uptime
+    name: Uptime
+  - platform: debug
+    free:
+      name: Heap Free
+    psram:
+      name: PSRAM Free
+
+text_sensor:
+  - platform: debug
+    device:
+      name: Device Info
+    reset_reason:
+      name: Reset Reason
+
+button:
+  - platform: restart
+    name: Restart

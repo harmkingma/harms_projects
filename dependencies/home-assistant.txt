@@ -1,0 +1,3 @@
+# Isolated from ESPHome/CV: Home Assistant has its own dependency constraints.
+-r '..\projects\home-assistant\ev_battery_health\requirements-dev.txt'
+-c 'locks\home-assistant-windows.txt'

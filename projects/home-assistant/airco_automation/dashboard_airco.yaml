@@ -1,0 +1,415 @@
+# Airco Dashboard — complete raw configuration
+#
+# Setup: Settings -> Dashboards -> open "Airco" -> Edit Dashboard -> 3-dot menu
+#        -> Raw configuration editor -> SELECT ALL, DELETE, paste this entire file.
+#
+# Uses built-in cards only. Requires packages/airco.yaml.
+#
+# Faikout entities used here that are NOT created by the package (Settings ->
+# Entities, search "faikout"; search & replace if different). Shown for the
+# master bedroom, slaapkamer 2 follows the same pattern:
+#   climate.faikout_masterbedroom_mqtt_hvac
+#   sensor.faikout_masterbedroom_power_consumption
+#   sensor.faikout_masterbedroom_outside
+#   sensor.faikout_masterbedroom_lifetime_heating_energy
+#   sensor.faikout_masterbedroom_lifetime_cooling_energy
+#   sensor.faikout_masterbedroom_lifetime_outside_energy
+#   button.faikout_masterbedroom_restart
+#   switch.faikout_masterbedroom_power
+
+title: Airco
+views:
+  # ===========================================================================
+  - title: Overview
+    path: overview
+    icon: mdi:air-conditioner
+    cards:
+      - type: horizontal-stack
+        cards:
+          - type: thermostat
+            entity: climate.faikout_masterbedroom_mqtt_hvac
+            name: Masterbedroom
+          - type: thermostat
+            entity: climate.faikout_slaapkamer_2_mqtt_hvac
+            name: Slaapkamer 2
+
+      - type: entities
+        title: Status
+        show_header_toggle: false
+        entities:
+          - entity: sensor.airco_masterbedroom_status
+            name: Masterbedroom
+          - entity: input_boolean.airco_masterbedroom_auto
+            name: Masterbedroom Auto
+          - type: divider
+          - entity: sensor.airco_slaapkamer_2_status
+            name: Slaapkamer 2
+          - entity: input_boolean.airco_slaapkamer_2_auto
+            name: Slaapkamer 2 Auto
+
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.faikout_masterbedroom_power_consumption
+            name: Master Power
+            min: 0
+            max: 2000
+            needle: true
+          - type: gauge
+            entity: sensor.faikout_slaapkamer_2_power_consumption
+            name: SK2 Power
+            min: 0
+            max: 2000
+            needle: true
+
+      - type: history-graph
+        title: Temperatures
+        hours_to_show: 24
+        entities:
+          - entity: sensor.airco_masterbedroom_room_temperature
+            name: Masterbedroom
+          - entity: sensor.airco_slaapkamer_2_room_temperature
+            name: Slaapkamer 2
+          - entity: sensor.faikout_masterbedroom_outside
+            name: Outside
+
+      - type: statistics-graph
+        title: Power
+        days_to_show: 1
+        period: 5minute
+        chart_type: line
+        stat_types:
+          - mean
+        entities:
+          - entity: sensor.faikout_masterbedroom_power_consumption
+            name: Masterbedroom
+          - entity: sensor.faikout_slaapkamer_2_power_consumption
+            name: Slaapkamer 2
+
+      - type: statistics-graph
+        title: Energy per Day (heating + cooling)
+        days_to_show: 30
+        period: day
+        chart_type: bar
+        stat_types:
+          - change
+        entities:
+          - entity: sensor.airco_masterbedroom_energy
+            name: Masterbedroom
+          - entity: sensor.airco_slaapkamer_2_energy
+            name: Slaapkamer 2
+
+  # ===========================================================================
+  - title: Masterbedroom
+    path: masterbedroom
+    icon: mdi:bed-king
+    cards:
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: climate.faikout_masterbedroom_mqtt_hvac
+            state:
+              - unavailable
+              - unknown
+        card:
+          type: markdown
+          content: >
+            ## <ha-icon icon="mdi:lan-disconnect"></ha-icon> Airco offline
+
+            The Faikout is not responding. Timeslot commands cannot be sent
+            until it returns.
+
+      - type: thermostat
+        entity: climate.faikout_masterbedroom_mqtt_hvac
+        name: Masterbedroom
+
+      - type: entities
+        title: Timeslot Control
+        show_header_toggle: false
+        entities:
+          - entity: input_boolean.airco_masterbedroom_auto
+            name: Auto
+          - entity: sensor.airco_masterbedroom_status
+            name: Status
+          - entity: sensor.airco_masterbedroom_active_slot
+            name: Active Slot (0 = none)
+
+      # Mode Off = airco off during the slot. Lowest slot number wins on overlap.
+      - type: entities
+        title: Timeslots
+        show_header_toggle: false
+        entities:
+          - entity: input_boolean.airco_masterbedroom_slot_1_enabled
+            name: Slot 1
+          - entity: input_datetime.airco_masterbedroom_slot_1_start
+            name: Start
+          - entity: input_datetime.airco_masterbedroom_slot_1_end
+            name: End
+          - entity: input_select.airco_masterbedroom_slot_1_mode
+            name: Mode
+          - entity: input_number.airco_masterbedroom_slot_1_temp
+            name: Temperature
+          - type: divider
+          - entity: input_boolean.airco_masterbedroom_slot_2_enabled
+            name: Slot 2
+          - entity: input_datetime.airco_masterbedroom_slot_2_start
+            name: Start
+          - entity: input_datetime.airco_masterbedroom_slot_2_end
+            name: End
+          - entity: input_select.airco_masterbedroom_slot_2_mode
+            name: Mode
+          - entity: input_number.airco_masterbedroom_slot_2_temp
+            name: Temperature
+          - type: divider
+          - entity: input_boolean.airco_masterbedroom_slot_3_enabled
+            name: Slot 3
+          - entity: input_datetime.airco_masterbedroom_slot_3_start
+            name: Start
+          - entity: input_datetime.airco_masterbedroom_slot_3_end
+            name: End
+          - entity: input_select.airco_masterbedroom_slot_3_mode
+            name: Mode
+          - entity: input_number.airco_masterbedroom_slot_3_temp
+            name: Temperature
+          - type: divider
+          - entity: input_boolean.airco_masterbedroom_slot_4_enabled
+            name: Slot 4
+          - entity: input_datetime.airco_masterbedroom_slot_4_start
+            name: Start
+          - entity: input_datetime.airco_masterbedroom_slot_4_end
+            name: End
+          - entity: input_select.airco_masterbedroom_slot_4_mode
+            name: Mode
+          - entity: input_number.airco_masterbedroom_slot_4_temp
+            name: Temperature
+
+      - type: entities
+        title: Readings
+        show_header_toggle: false
+        entities:
+          - entity: sensor.airco_masterbedroom_room_temperature
+            name: Inside
+          - entity: sensor.faikout_masterbedroom_outside
+            name: Outside
+          - entity: sensor.faikout_masterbedroom_power_consumption
+            name: Power
+          - entity: sensor.airco_masterbedroom_energy
+            name: Total Energy (heating + cooling)
+          - entity: sensor.faikout_masterbedroom_lifetime_heating_energy
+            name: Lifetime Heating Energy
+          - entity: sensor.faikout_masterbedroom_lifetime_cooling_energy
+            name: Lifetime Cooling Energy
+          - entity: sensor.faikout_masterbedroom_lifetime_outside_energy
+            name: Lifetime Outdoor Unit Energy
+
+      - type: entities
+        title: Device
+        show_header_toggle: false
+        entities:
+          - entity: switch.faikout_masterbedroom_power
+            name: Power
+          - entity: button.faikout_masterbedroom_restart
+            name: Restart Faikout
+
+      - type: history-graph
+        title: Temperature
+        hours_to_show: 24
+        entities:
+          - entity: sensor.airco_masterbedroom_room_temperature
+            name: Inside
+          - entity: sensor.faikout_masterbedroom_outside
+            name: Outside
+
+      - type: history-graph
+        title: Airco Mode and Timeslot
+        hours_to_show: 24
+        entities:
+          - entity: climate.faikout_masterbedroom_mqtt_hvac
+            name: Airco
+          - entity: sensor.airco_masterbedroom_active_slot
+            name: Active Slot
+
+      - type: statistics-graph
+        title: Power
+        days_to_show: 1
+        period: 5minute
+        chart_type: line
+        stat_types:
+          - mean
+          - max
+        entities:
+          - entity: sensor.faikout_masterbedroom_power_consumption
+            name: Power
+
+      - type: statistics-graph
+        title: Energy per Day
+        days_to_show: 30
+        period: day
+        chart_type: bar
+        stat_types:
+          - change
+        entities:
+          - entity: sensor.faikout_masterbedroom_lifetime_heating_energy
+            name: Heating
+          - entity: sensor.faikout_masterbedroom_lifetime_cooling_energy
+            name: Cooling
+          # Should roughly match heating + cooling per day if both read correctly.
+          - entity: sensor.faikout_masterbedroom_lifetime_outside_energy
+            name: Outdoor Unit
+
+  # ===========================================================================
+  - title: Slaapkamer 2
+    path: slaapkamer-2
+    icon: mdi:bed
+    cards:
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: climate.faikout_slaapkamer_2_mqtt_hvac
+            state:
+              - unavailable
+              - unknown
+        card:
+          type: markdown
+          content: >
+            ## <ha-icon icon="mdi:lan-disconnect"></ha-icon> Airco offline
+
+            The Faikout is not responding. Timeslot commands cannot be sent
+            until it returns.
+
+      - type: thermostat
+        entity: climate.faikout_slaapkamer_2_mqtt_hvac
+        name: Slaapkamer 2
+
+      - type: entities
+        title: Timeslot Control
+        show_header_toggle: false
+        entities:
+          - entity: input_boolean.airco_slaapkamer_2_auto
+            name: Auto
+          - entity: sensor.airco_slaapkamer_2_status
+            name: Status
+          - entity: sensor.airco_slaapkamer_2_active_slot
+            name: Active Slot (0 = none)
+
+      # Mode Off = airco off during the slot. Lowest slot number wins on overlap.
+      - type: entities
+        title: Timeslots
+        show_header_toggle: false
+        entities:
+          - entity: input_boolean.airco_slaapkamer_2_slot_1_enabled
+            name: Slot 1
+          - entity: input_datetime.airco_slaapkamer_2_slot_1_start
+            name: Start
+          - entity: input_datetime.airco_slaapkamer_2_slot_1_end
+            name: End
+          - entity: input_select.airco_slaapkamer_2_slot_1_mode
+            name: Mode
+          - entity: input_number.airco_slaapkamer_2_slot_1_temp
+            name: Temperature
+          - type: divider
+          - entity: input_boolean.airco_slaapkamer_2_slot_2_enabled
+            name: Slot 2
+          - entity: input_datetime.airco_slaapkamer_2_slot_2_start
+            name: Start
+          - entity: input_datetime.airco_slaapkamer_2_slot_2_end
+            name: End
+          - entity: input_select.airco_slaapkamer_2_slot_2_mode
+            name: Mode
+          - entity: input_number.airco_slaapkamer_2_slot_2_temp
+            name: Temperature
+          - type: divider
+          - entity: input_boolean.airco_slaapkamer_2_slot_3_enabled
+            name: Slot 3
+          - entity: input_datetime.airco_slaapkamer_2_slot_3_start
+            name: Start
+          - entity: input_datetime.airco_slaapkamer_2_slot_3_end
+            name: End
+          - entity: input_select.airco_slaapkamer_2_slot_3_mode
+            name: Mode
+          - entity: input_number.airco_slaapkamer_2_slot_3_temp
+            name: Temperature
+          - type: divider
+          - entity: input_boolean.airco_slaapkamer_2_slot_4_enabled
+            name: Slot 4
+          - entity: input_datetime.airco_slaapkamer_2_slot_4_start
+            name: Start
+          - entity: input_datetime.airco_slaapkamer_2_slot_4_end
+            name: End
+          - entity: input_select.airco_slaapkamer_2_slot_4_mode
+            name: Mode
+          - entity: input_number.airco_slaapkamer_2_slot_4_temp
+            name: Temperature
+
+      - type: entities
+        title: Readings
+        show_header_toggle: false
+        entities:
+          - entity: sensor.airco_slaapkamer_2_room_temperature
+            name: Inside
+          - entity: sensor.faikout_slaapkamer_2_outside
+            name: Outside
+          - entity: sensor.faikout_slaapkamer_2_power_consumption
+            name: Power
+          - entity: sensor.airco_slaapkamer_2_energy
+            name: Total Energy (heating + cooling)
+          - entity: sensor.faikout_slaapkamer_2_lifetime_heating_energy
+            name: Lifetime Heating Energy
+          - entity: sensor.faikout_slaapkamer_2_lifetime_cooling_energy
+            name: Lifetime Cooling Energy
+          - entity: sensor.faikout_slaapkamer_2_lifetime_outside_energy
+            name: Lifetime Outdoor Unit Energy
+
+      - type: entities
+        title: Device
+        show_header_toggle: false
+        entities:
+          - entity: switch.faikout_slaapkamer_2_power
+            name: Power
+          - entity: button.faikout_slaapkamer_2_restart
+            name: Restart Faikout
+
+      - type: history-graph
+        title: Temperature
+        hours_to_show: 24
+        entities:
+          - entity: sensor.airco_slaapkamer_2_room_temperature
+            name: Inside
+          - entity: sensor.faikout_slaapkamer_2_outside
+            name: Outside
+
+      - type: history-graph
+        title: Airco Mode and Timeslot
+        hours_to_show: 24
+        entities:
+          - entity: climate.faikout_slaapkamer_2_mqtt_hvac
+            name: Airco
+          - entity: sensor.airco_slaapkamer_2_active_slot
+            name: Active Slot
+
+      - type: statistics-graph
+        title: Power
+        days_to_show: 1
+        period: 5minute
+        chart_type: line
+        stat_types:
+          - mean
+          - max
+        entities:
+          - entity: sensor.faikout_slaapkamer_2_power_consumption
+            name: Power
+
+      - type: statistics-graph
+        title: Energy per Day
+        days_to_show: 30
+        period: day
+        chart_type: bar
+        stat_types:
+          - change
+        entities:
+          - entity: sensor.faikout_slaapkamer_2_lifetime_heating_energy
+            name: Heating
+          - entity: sensor.faikout_slaapkamer_2_lifetime_cooling_energy
+            name: Cooling
+          - entity: sensor.faikout_slaapkamer_2_lifetime_outside_energy
+            name: Outdoor Unit

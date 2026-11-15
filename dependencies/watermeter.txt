@@ -1,0 +1,5 @@
+# The project's manifest remains the authoritative dependency declaration.
+-r '..\projects\espcam-water\cv\requirements-dev.txt'
+-c 'locks\watermeter-windows.txt'
+pyserial==3.5
+tzdata==2026.6

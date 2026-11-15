@@ -1,0 +1,12 @@
+.venv/
+.venv-esphome/
+.venv-cv/
+.pytest_cache/
+esphome/secrets.yaml
+esphome/.esphome/
+__pycache__/
+*.log
+esphome/upload.txt
+dataset/
+addon/water_meter_reader/app/
+dist/

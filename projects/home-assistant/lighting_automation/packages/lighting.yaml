@@ -1,0 +1,561 @@
+# =============================================================================
+# Lighting Package - two-stage switch-off, WC auto-off,
+#                    outside presence lighting via Ring cameras,
+#                    attic presence lighting via radar
+# =============================================================================
+# Requires Home Assistant 2024.10+ (modern triggers/conditions/actions syntax).
+#
+# UNRELIABLE ZIGBEE STATE
+# Toggling a Zigbee switch quickly (on/off/on) can leave Home Assistant showing
+# the wrong state: a command or state report gets lost or arrives out of order.
+# So nothing here trusts the reported state before switching. Every scheduled
+# command goes through script.lights_switch_reliable, which sends the command
+# to every target regardless of its state, repeats it, then asks the device to
+# re-report (effective on ZHA, a harmless no-op on Zigbee2MQTT).
+#
+# SWITCH-OFF GROUPS
+# Every light belongs to exactly one of these. Move a light between groups by
+# moving its line in the 'group:' section below.
+#   group.lights_off_time_1   off at Time 1 (23:00)
+#   group.lights_off_time_2   off at Time 2 (00:00), the woonkamer dimmer
+#
+# Entity IDs assumed (adjust here if yours differ):
+#   light.attic
+#   light.overloop_light
+#   light.hallway
+#   light.hallway_outside_light               outside front light
+#   light.dimmer_woonkamer_light              dimmable
+#   light.dimmer_woonkamer_light_2            dimmable
+#   light.slaapkamer_licht                    dimmable
+#   light.kamer_alexander
+#   light.bijkeuken_licht                     
+#   switch.garage_licht                        a switch, not a light
+#   switch.outside_back                        a switch, not a light
+#   light.keuken_licht                        dimmable
+#   light.hallway_licht_wc                    WC - note the "halleay" spelling,
+#                                             check it in Developer Tools
+#   binary_sensor.front_door_motion           ring-mqtt doorbell motion
+#   binary_sensor.front_door_ding             ring-mqtt doorbell button press
+#   binary_sensor.garden_motion               ring-mqtt garden camera motion
+#   binary_sensor.attic_presence_temperature_attic_presence
+#   binary_sensor.attic_presence_temperature_attic_quiet_presence
+#                                             attic radar (ESPHome)
+#
+# ATTIC PRESENCE LIGHTING
+# Presence or Quiet Presence switches light.attic on. Whenever the light is on
+# (also when switched on by hand) it goes off after the off delay without any
+# presence.
+#
+# OUTSIDE PRESENCE LIGHTING
+# Motion (or a doorbell press) switches the light on and starts a timer; the
+# timer restarts when the motion sensor clears, so the light goes off the
+# configured delay after the last motion ended. Only when the sun is below the
+# horizon. Skipped when the light was already on (switched on by hand).
+#
+# FIRST RUN
+# Helpers carry no 'initial:' so your settings survive restarts, which means
+# times start at 00:00 and numbers at their minimum. Set these once on the
+# dashboard:
+#
+#   Switch-off Time 1 ........ 23:00
+#   Switch-off Time 1 Enabled  on
+#   Switch-off Time 2 ........ 00:00   (= 24:00)
+#   Switch-off Time 2 Enabled  on
+#   Command Repeats .......... 2
+#   WC Auto-off Delay ........ 20 min
+#   WC Auto-off Enabled ...... on
+#   Presence Off Delay ....... 5 min
+#   Front Presence Enabled ... on
+#   Garden Presence Enabled .. on
+#
+# The attic helpers are set to their defaults (enabled, 10 min off delay)
+# automatically on the first restart after adding this package.
+# =============================================================================
+
+# Mixed light/switch domains are fine because switching goes through
+# homeassistant.turn_on / turn_off.
+
+group:
+  lights_off_time_1:
+    name: Lights Off At Time 1
+    icon: mdi:lightbulb-group-off-outline
+    entities:
+      - light.attic
+      - light.overloop_light
+      - light.hallway
+      - light.hallway_outside_light
+      - light.dimmer_woonkamer_light_2
+      - light.slaapkamer_licht
+      - light.kamer_alexander
+      - light.bijkeuken_licht
+      - switch.garage_licht
+      - switch.outside_back
+      - light.keuken_licht
+      - light.hallway_licht_wc
+
+  lights_off_time_2:
+    name: Lights Off At Time 2
+    icon: mdi:lightbulb-group-off
+    entities:
+      - light.dimmer_woonkamer_light
+
+  all_house_lights:
+    name: All House Lights
+    icon: mdi:lightbulb-group
+    entities:
+      - group.lights_off_time_1
+      - group.lights_off_time_2
+
+input_boolean:
+  lights_off_time_1_enabled:
+    name: Switch-off Time 1 Enabled
+    icon: mdi:weather-sunset-down
+
+  lights_off_time_2_enabled:
+    name: Switch-off Time 2 Enabled
+    icon: mdi:weather-night
+
+  wc_light_auto_off_enabled:
+    name: WC Auto-off Enabled
+    icon: mdi:timer-sand
+
+  outside_front_presence_enabled:
+    name: Front Presence Light Enabled
+    icon: mdi:doorbell-video
+
+  outside_garden_presence_enabled:
+    name: Garden Presence Light Enabled
+    icon: mdi:cctv
+
+  attic_presence_light_enabled:
+    name: Attic Presence Light Enabled
+    icon: mdi:home-roof
+
+  # Marks that the defaults below have been applied once.
+  attic_presence_light_defaults_set:
+    name: Attic Presence Light Defaults Set
+    icon: mdi:check
+
+input_datetime:
+  lights_off_time_1:
+    name: Switch-off Time 1
+    has_date: false
+    has_time: true
+    icon: mdi:clock-time-eleven-outline
+
+  lights_off_time_2:
+    name: Switch-off Time 2
+    has_date: false
+    has_time: true
+    icon: mdi:clock-time-twelve-outline
+
+input_number:
+  wc_light_auto_off_minutes:
+    name: WC Auto-off Delay
+    min: 1
+    max: 120
+    step: 1
+    unit_of_measurement: "min"
+    mode: box
+    icon: mdi:timer-sand
+
+  lights_command_repeats:
+    name: Command Repeats
+    min: 1
+    max: 5
+    step: 1
+    mode: box
+    icon: mdi:repeat
+
+  outside_presence_off_minutes:
+    name: Presence Off Delay
+    min: 1
+    max: 60
+    step: 1
+    unit_of_measurement: "min"
+    mode: box
+    icon: mdi:timer-sand
+
+  attic_presence_off_minutes:
+    name: Attic Off Delay
+    min: 1
+    max: 120
+    step: 1
+    unit_of_measurement: "min"
+    mode: box
+    icon: mdi:timer-sand
+
+# A timer rather than a 'for:' trigger, because 'for:' is lost on a restart
+# and the WC light would then stay on indefinitely.
+timer:
+  wc_light_auto_off:
+    name: WC Light Auto-off
+    icon: mdi:timer-outline
+    duration: "00:20:00"
+    restore: true
+
+  outside_front_presence:
+    name: Front Presence Light
+    icon: mdi:timer-outline
+    duration: "00:05:00"
+    restore: true
+
+  outside_garden_presence:
+    name: Garden Presence Light
+    icon: mdi:timer-outline
+    duration: "00:05:00"
+    restore: true
+
+  attic_presence_light:
+    name: Attic Auto-off
+    icon: mdi:timer-outline
+    duration: "00:10:00"
+    restore: true
+
+script:
+  lights_switch_reliable:
+    alias: Lights Switch (repeated)
+    icon: mdi:lightbulb-auto
+    mode: parallel
+    max: 20
+    fields:
+      entities:
+        description: Lights, switches or groups to switch
+        example: group.lights_off_time_1
+        required: true
+      command:
+        description: "'on' or 'off'"
+        example: "off"
+        required: true
+    sequence:
+      - variables:
+          targets: "{{ expand(entities) | map(attribute='entity_id') | list }}"
+      - repeat:
+          count: "{{ [states('input_number.lights_command_repeats') | int(2), 1] | max }}"
+          sequence:
+            - action: "homeassistant.turn_{{ command }}"
+              target:
+                entity_id: "{{ targets }}"
+            - delay:
+                seconds: 3
+      - action: homeassistant.update_entity
+        target:
+          entity_id: "{{ targets }}"
+        continue_on_error: true
+
+# -----------------------------------------------------------------------------
+# Automations
+# -----------------------------------------------------------------------------
+automation:
+  - id: lights_scheduled_off
+    alias: "Lights: scheduled switch-off"
+    mode: queued
+    triggers:
+      - trigger: time
+        at: input_datetime.lights_off_time_1
+        id: "1"
+      - trigger: time
+        at: input_datetime.lights_off_time_2
+        id: "2"
+    conditions:
+      - condition: template
+        value_template: >
+          {{ is_state('input_boolean.lights_off_time_' ~ trigger.id ~ '_enabled', 'on') }}
+    actions:
+      - action: script.lights_switch_reliable
+        data:
+          entities: "group.lights_off_time_{{ trigger.id }}"
+          command: "off"
+
+  # No timer cancel on 'off': after a fast on/off/on HA can show 'off' while the
+  # lamp is on, so the timer always runs out and sends 'off' regardless.
+  - id: lights_wc_auto_off
+    alias: "Lights: WC auto-off"
+    mode: queued
+    triggers:
+      - trigger: state
+        entity_id: light.hallway_licht_wc
+        to: "on"
+        id: light_on
+      - trigger: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.wc_light_auto_off
+        id: timer_finished
+      # Covers the light being switched on while Home Assistant was down.
+      - trigger: homeassistant
+        event: start
+        id: ha_start
+    actions:
+      - choose:
+          - conditions:
+              - condition: trigger
+                id:
+                  - light_on
+                  - ha_start
+              - condition: state
+                entity_id: light.hallway_licht_wc
+                state: "on"
+              - condition: state
+                entity_id: input_boolean.wc_light_auto_off_enabled
+                state: "on"
+              # On start, keep a restored running timer instead of resetting it.
+              - condition: template
+                value_template: >
+                  {{ trigger.id == 'light_on'
+                     or is_state('timer.wc_light_auto_off', 'idle') }}
+            sequence:
+              - action: timer.start
+                target:
+                  entity_id: timer.wc_light_auto_off
+                data:
+                  duration: >
+                    {{ (states('input_number.wc_light_auto_off_minutes') | float(20) * 60)
+                       | int | timestamp_custom('%H:%M:%S', false) }}
+
+          - conditions:
+              - condition: trigger
+                id: timer_finished
+              - condition: state
+                entity_id: input_boolean.wc_light_auto_off_enabled
+                state: "on"
+            sequence:
+              - action: script.lights_switch_reliable
+                data:
+                  entities: light.hallway_licht_wc
+                  command: "off"
+
+  - id: lights_outside_presence
+    alias: "Lights: outside presence (Ring motion)"
+    mode: queued
+    triggers:
+      # from 'off' so an MQTT reconnect (unavailable -> on) doesn't count as motion.
+      - trigger: state
+        entity_id: binary_sensor.front_door_motion
+        from: "off"
+        to: "on"
+        id: front_motion
+      - trigger: state
+        entity_id: binary_sensor.front_door_ding
+        from: "off"
+        to: "on"
+        id: front_ding
+      - trigger: state
+        entity_id: binary_sensor.garden_motion
+        from: "off"
+        to: "on"
+        id: garden_motion
+      - trigger: state
+        entity_id: binary_sensor.front_door_motion
+        from: "on"
+        to: "off"
+        id: front_clear
+      - trigger: state
+        entity_id: binary_sensor.garden_motion
+        from: "on"
+        to: "off"
+        id: garden_clear
+      - trigger: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.outside_front_presence
+        id: front_timer
+      - trigger: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.outside_garden_presence
+        id: garden_timer
+    variables:
+      zone: "{{ trigger.id.split('_')[0] }}"
+      target: >
+        {{ {'front': 'light.hallway_outside_light',
+            'garden': 'switch.outside_back'}[zone] }}
+      presence_timer: "timer.outside_{{ zone }}_presence"
+      off_delay: >
+        {{ (states('input_number.outside_presence_off_minutes') | float(5) * 60)
+           | int | timestamp_custom('%H:%M:%S', false) }}
+    actions:
+      - choose:
+          - conditions:
+              - condition: trigger
+                id:
+                  - front_motion
+                  - front_ding
+                  - garden_motion
+              - condition: template
+                value_template: >
+                  {{ is_state('input_boolean.outside_' ~ zone ~ '_presence_enabled', 'on') }}
+              - condition: state
+                entity_id: sun.sun
+                state: below_horizon
+              # Already on with no presence timer running = switched on by hand.
+              - condition: template
+                value_template: >
+                  {{ not (is_state(target, 'on') and is_state(presence_timer, 'idle')) }}
+            sequence:
+              - action: timer.start
+                target:
+                  entity_id: "{{ presence_timer }}"
+                data:
+                  duration: "{{ off_delay }}"
+              - action: script.lights_switch_reliable
+                data:
+                  entities: "{{ target }}"
+                  command: "on"
+
+          # Only restart a timer this automation started; never start one here.
+          - conditions:
+              - condition: trigger
+                id:
+                  - front_clear
+                  - garden_clear
+              - condition: template
+                value_template: "{{ is_state(presence_timer, 'active') }}"
+            sequence:
+              - action: timer.start
+                target:
+                  entity_id: "{{ presence_timer }}"
+                data:
+                  duration: "{{ off_delay }}"
+
+          - conditions:
+              - condition: trigger
+                id:
+                  - front_timer
+                  - garden_timer
+            sequence:
+              - action: script.lights_switch_reliable
+                data:
+                  entities: "{{ target }}"
+                  command: "off"
+
+  - id: lights_attic_presence
+    alias: "Lights: attic presence (radar)"
+    mode: queued
+    triggers:
+      # No 'from': presence reported right after an ESPHome reconnect is real.
+      - trigger: state
+        entity_id:
+          - binary_sensor.attic_presence_temperature_attic_presence
+          - binary_sensor.attic_presence_temperature_attic_quiet_presence
+        to: "on"
+        id: presence_on
+      # No 'to': the radar going unavailable also starts the countdown.
+      - trigger: state
+        entity_id:
+          - binary_sensor.attic_presence_temperature_attic_presence
+          - binary_sensor.attic_presence_temperature_attic_quiet_presence
+        from: "on"
+        id: presence_off
+      - trigger: state
+        entity_id: light.attic
+        from: "off"
+        to: "on"
+        id: light_on
+      - trigger: event
+        event_type: timer.finished
+        event_data:
+          entity_id: timer.attic_presence_light
+        id: timer_finished
+      - trigger: state
+        entity_id: input_boolean.attic_presence_light_enabled
+        to: "on"
+        id: enabled
+      - trigger: state
+        entity_id: input_boolean.attic_presence_light_enabled
+        to: "off"
+        id: disabled
+      # Covers the light being switched on while Home Assistant was down.
+      - trigger: homeassistant
+        event: start
+        id: ha_start
+    variables:
+      target: light.attic
+      off_timer: timer.attic_presence_light
+      enabled: "{{ is_state('input_boolean.attic_presence_light_enabled', 'on') }}"
+      present: >
+        {{ is_state('binary_sensor.attic_presence_temperature_attic_presence', 'on')
+           or is_state('binary_sensor.attic_presence_temperature_attic_quiet_presence', 'on') }}
+      off_delay: >
+        {{ (states('input_number.attic_presence_off_minutes') | float(10) * 60)
+           | int | timestamp_custom('%H:%M:%S', false) }}
+    actions:
+      - choose:
+          - conditions:
+              - condition: trigger
+                id: presence_on
+              - condition: template
+                value_template: "{{ enabled }}"
+            sequence:
+              - action: timer.cancel
+                target:
+                  entity_id: "{{ off_timer }}"
+              - action: script.lights_switch_reliable
+                data:
+                  entities: "{{ target }}"
+                  command: "on"
+
+          # Light on (also by hand) and nobody there: count down.
+          - conditions:
+              - condition: trigger
+                id:
+                  - presence_off
+                  - light_on
+                  - enabled
+                  - ha_start
+              - condition: template
+                value_template: "{{ enabled and is_state(target, 'on') and not present }}"
+              # On start, keep a restored running timer instead of resetting it.
+              - condition: template
+                value_template: "{{ trigger.id != 'ha_start' or is_state(off_timer, 'idle') }}"
+            sequence:
+              - action: timer.start
+                target:
+                  entity_id: "{{ off_timer }}"
+                data:
+                  duration: "{{ off_delay }}"
+
+          - conditions:
+              - condition: trigger
+                id: timer_finished
+              - condition: template
+                value_template: "{{ enabled and not present }}"
+            sequence:
+              - action: script.lights_switch_reliable
+                data:
+                  entities: "{{ target }}"
+                  command: "off"
+
+          - conditions:
+              - condition: trigger
+                id: disabled
+            sequence:
+              - action: timer.cancel
+                target:
+                  entity_id: "{{ off_timer }}"
+
+  # Helpers carry no 'initial:' (it would overwrite dashboard changes on every
+  # restart), so the requested defaults are applied once here.
+  - id: lights_attic_defaults
+    alias: "Lights: attic presence defaults"
+    mode: single
+    triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: automation_reloaded
+    conditions:
+      - condition: state
+        entity_id: input_boolean.attic_presence_light_defaults_set
+        state: "off"
+    actions:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.attic_presence_off_minutes
+        data:
+          value: 10
+      - action: input_boolean.turn_on
+        target:
+          entity_id:
+            - input_boolean.attic_presence_light_enabled
+            - input_boolean.attic_presence_light_defaults_set

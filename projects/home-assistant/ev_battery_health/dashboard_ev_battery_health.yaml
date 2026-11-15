@@ -1,0 +1,212 @@
+# EV Battery Health Dashboard — complete raw configuration
+#
+# Setup: Settings -> Dashboards -> Add dashboard -> "New dashboard from scratch"
+#        name it e.g. "EV Battery Health", open it -> Edit Dashboard -> 3-dot menu
+#        -> Raw configuration editor -> SELECT ALL, DELETE, paste this entire file.
+#
+# Uses built-in cards only. The statistics graphs read Home Assistant's
+# long-term statistics, which are kept indefinitely, so the trend lines grow
+# with the car's life rather than being cut off by the recorder's purge window.
+
+views:
+  - title: Battery Health
+    path: battery-health
+    icon: mdi:battery-heart-variant
+    cards:
+      # -----------------------------------------------------------------------
+      # SOH is unknown until 3 sessions are accepted; a gauge cannot show that,
+      # so a placeholder with the progress is shown instead.
+      - type: conditional
+        conditions:
+          - condition: numeric_state
+            entity: sensor.ev_battery_soh
+            above: 0
+        card:
+          type: gauge
+          entity: sensor.ev_battery_soh
+          name: State of Health
+          unit: "%"
+          min: 70
+          max: 105
+          needle: true
+          severity:
+            green: 90
+            yellow: 80
+            red: 0
+
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: sensor.ev_battery_soh
+            state:
+              - unknown
+              - unavailable
+        card:
+          type: markdown
+          title: State of Health
+          content: |-
+            {%- set n = states('sensor.ev_battery_health_history') | int(0) -%}
+            **Collecting data** — {{ [n, 3] | min }} of 3 accepted charging sessions.
+
+            The estimate appears after 3 sessions with at least
+            {{ states('input_number.ev_bh_min_soc_gain') | int(30) }} points of SOC gain.
+            See *Recent Charging Sessions* for why a session was rejected.
+
+      # -----------------------------------------------------------------------
+      - type: entities
+        title: Estimate
+        show_header_toggle: false
+        entities:
+          - entity: sensor.ev_battery_usable_capacity
+            name: Usable Capacity (median)
+          - type: attribute
+            entity: sensor.ev_battery_usable_capacity
+            attribute: spread_kwh
+            name: Session Scatter (MAD)
+            suffix: kWh
+          - type: attribute
+            entity: sensor.ev_battery_usable_capacity
+            attribute: window
+            name: Sessions in Median
+          - entity: sensor.ev_battery_health_history
+            name: Accepted Sessions
+          - entity: sensor.ev_battery_soh
+            name: SOH vs Reference
+          - entity: input_number.ev_bh_reference_capacity
+            name: Reference Capacity
+          - entity: sensor.ev_battery_capacity_change
+            name: Change Since Baseline
+          - type: attribute
+            entity: sensor.ev_battery_capacity_change
+            attribute: baseline_kwh
+            name: Baseline
+            suffix: kWh
+          - type: attribute
+            entity: sensor.ev_battery_capacity_change
+            attribute: baseline_date
+            name: Baseline Complete
+          - entity: sensor.ev_battery_capacity_last_session
+            name: Last Accepted Session
+          - entity: sensor.ev_battery_range_at_100
+            name: Rated Range at 100%
+          - entity: sensor.life_the_universe_and_everything_odometer
+            name: Odometer
+
+      # -----------------------------------------------------------------------
+      - type: markdown
+        title: Current Measurement
+        content: |-
+          {%- set s = state_attr('sensor.ev_battery_health_measurement', 'session') or {} -%}
+          {%- if s.get('phase') == 'measuring' %}
+          **Measuring** since {{ s.start_ts | timestamp_custom('%a %d %b %H:%M') }}
+
+          | | |
+          |---|---|
+          | SOC | {{ s.start_soc | int }} % → {{ s.end_soc | int }} % (gain {{ s.acc_soc | int }} points) |
+          | Energy added | {{ s.acc_kwh | round(2) }} kWh |
+          | Running estimate | {{ ((s.acc_kwh / s.acc_soc * 100) | round(1) ~ ' kWh') if s.acc_soc > 0 else '–' }} |
+          | Min. outside temp | {{ (s.tmin ~ ' °C') if s.tmin is not none else '–' }} |
+          | Days since 100% at start | {{ s.dsf if s.dsf is not none else 'unknown' }} |
+          | Counter resets skipped | {{ s.resets }} |
+
+          Needs ≥ {{ states('input_number.ev_bh_min_soc_gain') | int }} points of SOC gain to count.
+          {%- else %}
+          Idle — waiting for the next charging session.
+          {%- endif %}
+
+          {% set lf = state_attr('sensor.ev_battery_health_measurement', 'last_full_charge_ts') -%}
+          Last 100% charge seen: {{ (lf | timestamp_custom('%a %d %b %Y %H:%M')) if lf else 'not yet' }}
+
+      # -----------------------------------------------------------------------
+      - type: statistics-graph
+        title: Usable Capacity
+        entities:
+          - entity: sensor.ev_battery_usable_capacity
+            name: Median (last 10)
+          - entity: sensor.ev_battery_capacity_last_session
+            name: Per session
+        stat_types:
+          - mean
+        period: day
+        days_to_show: 365
+        chart_type: line
+
+      - type: statistics-graph
+        title: State of Health
+        entities:
+          - entity: sensor.ev_battery_soh
+            name: SOH
+          - entity: sensor.ev_battery_capacity_change
+            name: Change since baseline
+        stat_types:
+          - mean
+        period: day
+        days_to_show: 365
+        chart_type: line
+
+      - type: statistics-graph
+        title: Rated Range at 100% (cross-check)
+        entities:
+          - entity: sensor.ev_battery_range_at_100
+            name: Range at 100%
+        stat_types:
+          - mean
+        period: day
+        days_to_show: 365
+        chart_type: line
+
+      # -----------------------------------------------------------------------
+      - type: markdown
+        title: Recent Charging Sessions
+        content: |-
+          {%- set rows = state_attr('sensor.ev_battery_health_history', 'recent_sessions') or [] -%}
+          {%- if rows %}
+          | Start | SOC | Energy | Capacity | Temp | Result |
+          |---|---|---|---|---|---|
+          {% for r in rows | reverse -%}
+          | {{ r.date }} | {{ r.soc0 | int }}→{{ r.soc1 | int }} % | {{ r.kwh }} kWh | {{ (r.cap ~ ' kWh') if r.cap is not none else '–' }} | {{ (r.tmin ~ ' °C') if r.tmin is not none else '–' }} | {{ '✅' if r.ok else '❌ ' ~ r.why }} |
+          {% endfor -%}
+          {%- else %}
+          No completed charging sessions yet.
+          {%- endif -%}
+
+      # -----------------------------------------------------------------------
+      - type: entities
+        title: Quality Settings
+        show_header_toggle: false
+        entities:
+          - entity: input_number.ev_bh_reference_capacity
+            name: Reference Usable Capacity
+          - entity: input_number.ev_bh_min_soc_gain
+            name: Min. SOC Gain per Session
+          - entity: input_number.ev_bh_min_outside_temp
+            name: Min. Outside Temperature
+          - entity: input_number.ev_bh_max_days_since_full
+            name: Max. Days Since 100% (LFP)
+
+      - type: horizontal-stack
+        cards:
+          - type: button
+            name: Discard Measurement
+            icon: mdi:delete-clock
+            entity: script.ev_bh_discard_measurement
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: script.turn_on
+              target:
+                entity_id: script.ev_bh_discard_measurement
+              confirmation:
+                text: Discard the measurement in progress?
+          - type: button
+            name: Clear History
+            icon: mdi:delete-forever
+            entity: script.ev_bh_clear_history
+            show_state: false
+            tap_action:
+              action: perform-action
+              perform_action: script.turn_on
+              target:
+                entity_id: script.ev_bh_clear_history
+              confirmation:
+                text: Delete all battery health samples and the baseline? This cannot be undone.

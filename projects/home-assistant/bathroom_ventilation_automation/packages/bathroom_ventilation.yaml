@@ -1,0 +1,571 @@
+# =============================================================================
+# Bathroom Ventilation Package - proportional Itho CVE control
+# =============================================================================
+# Requires Home Assistant 2024.10+ (modern triggers/conditions/actions syntax).
+#
+# DEPENDS ON packages/bathroom_radiator.yaml for:
+#   sensor.bathroom_humidity_above_baseline   current RH minus its 3 h minimum
+#   input_boolean.bathroom_shower_session     shower cycle in progress
+# Install that package first or every sensor here falls back to base speed.
+#
+# Entity IDs assumed (adjust here if yours differ):
+#   fan.cve_silent_fan                        Itho CVE-S Silent, created by the
+#                                             add-on's MQTT auto-discovery
+#
+# Temperature and humidity are NOT auto-discovered for CVE units. They come
+# from packages/itho_mqtt_sensors.yaml, which is optional - this package
+# controls on the bathroom Zigbee sensor, not the Itho's internal one.
+#
+# WHY PROPORTIONAL RATHER THAN ON/OFF
+# A fixed "above 70% go to full, below 60% go to low" rule fights the seasons
+# and slams between two noisy extremes. Instead the speed is a straight line
+# through how far RH sits above its own rolling 3 h minimum, so the fan eases
+# up as the room steams and eases back down as it clears.
+#
+# This is a closed loop - the fan changes the very humidity it reacts to - so
+# three brakes stop it hunting:
+#   deadband      ignore differences smaller than a few percent
+#   min interval  never re-command faster than every couple of minutes
+#   boost cap     drop out of high speed after a set time, for noise
+#
+# FIRST RUN
+# Helpers carry no 'initial:' so your tuning survives restarts, which means
+# they start at their minimum. Set these once on the dashboard:
+#
+#   Excess Low ............... 3   %     below this, base speed
+#   Excess High .............. 15  %     at this, full speed
+#   Base Speed ............... 20  %     continuous background ventilation
+#   Max Speed ................ 100 %
+#   Shower Minimum Speed ..... 70  %     floor while a shower is detected
+#   Boost Time Limit ......... 45  min
+#   Boost Cap Speed .......... 50  %     speed allowed after that limit
+#   Night Cap Speed .......... 40  %
+#   Night Start / End ........ 22:00 / 07:00
+#   Deadband ................. 5   %
+#   Minimum Command Interval . 120 s
+#   Re-assert Interval ....... 30  min
+#   Calibration Gain ......... 1.06
+#   Calibration Offset ....... 6   %
+#   Calibration Enabled ...... on   (turn off to send targets uncorrected)
+#   Mismatch Tolerance ....... 5   %   (raise above 8 if calibration is off)
+#   Automation Enabled ....... on
+#
+#   Cooking Rate Threshold ... 0.5 %/min  (measured cook ramp is ~1.0)
+#   Cooking Rise Above Base .. 4   %
+#   Cooking Fan Speed ........ 60  %
+#   Cooking Boost Duration ... 30  min
+#   Cooking Boost Enabled .... on
+# =============================================================================
+
+input_boolean:
+  bathroom_fan_auto:
+    name: Bathroom Fan Automation Enabled
+    icon: mdi:fan-auto
+
+  cooking_boost_enabled:
+    name: Cooking Boost Enabled
+    icon: mdi:stove
+
+  bathroom_fan_calibration:
+    name: Bathroom Fan Calibration Enabled
+    icon: mdi:tune
+
+input_datetime:
+  bathroom_fan_boost_started:
+    name: Bathroom Fan Boost Started
+    has_date: true
+    has_time: true
+    icon: mdi:fan-clock
+
+  bathroom_fan_last_command:
+    name: Bathroom Fan Last Command
+    has_date: true
+    has_time: true
+    icon: mdi:send-clock
+
+  bathroom_fan_night_start:
+    name: Bathroom Fan Night Start
+    has_date: false
+    has_time: true
+    icon: mdi:weather-night
+
+  bathroom_fan_night_end:
+    name: Bathroom Fan Night End
+    has_date: false
+    has_time: true
+    icon: mdi:weather-sunset-up
+
+input_number:
+  bathroom_fan_excess_low:
+    name: Bathroom Fan Excess Low
+    min: 0
+    max: 15
+    step: 0.5
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:arrow-down-thin
+
+  bathroom_fan_excess_high:
+    name: Bathroom Fan Excess High
+    min: 5
+    max: 40
+    step: 0.5
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:arrow-up-thin
+
+  bathroom_fan_base_speed:
+    name: Bathroom Fan Base Speed
+    min: 10
+    max: 60
+    step: 5
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:fan-speed-1
+
+  bathroom_fan_max_speed:
+    name: Bathroom Fan Max Speed
+    min: 40
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:fan-speed-3
+
+  bathroom_fan_shower_min_speed:
+    name: Bathroom Fan Shower Minimum Speed
+    min: 20
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:shower
+
+  bathroom_fan_boost_minutes:
+    name: Bathroom Fan Boost Time Limit
+    min: 5
+    max: 180
+    step: 5
+    unit_of_measurement: "min"
+    mode: box
+    icon: mdi:timer-sand
+
+  bathroom_fan_boost_cap_speed:
+    name: Bathroom Fan Boost Cap Speed
+    min: 20
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:volume-low
+
+  bathroom_fan_night_cap_speed:
+    name: Bathroom Fan Night Cap Speed
+    min: 10
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:sleep
+
+  bathroom_fan_deadband:
+    name: Bathroom Fan Deadband
+    min: 1
+    max: 25
+    step: 1
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:arrow-expand-horizontal
+
+  bathroom_fan_min_interval_seconds:
+    name: Bathroom Fan Minimum Command Interval
+    min: 30
+    max: 900
+    step: 30
+    unit_of_measurement: "s"
+    mode: box
+    icon: mdi:timer-cog-outline
+
+  # What was last sent, not what the unit reports back. The CVE applies a lower
+  # speed than commanded (20% asked, ~15.5% applied), so a readback comparison
+  # never settles and would re-command on every pass.
+  bathroom_fan_last_commanded:
+    name: Bathroom Fan Last Commanded
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:send-check
+
+  # Comparing against our own last command would never notice a speed changed
+  # outside Home Assistant, so the setpoint is re-sent periodically regardless.
+  bathroom_fan_reassert_minutes:
+    name: Bathroom Fan Re-assert Interval
+    min: 5
+    max: 240
+    step: 5
+    unit_of_measurement: "min"
+    mode: box
+    icon: mdi:repeat
+
+  # Measured on this unit: 20 -> 15.5, 50 -> 47, 100 -> 100, which fits
+  # applied = 1.06 * commanded - 6. The command is pre-distorted by the
+  # inverse so the delivered speed matches the target.
+  bathroom_fan_cal_gain:
+    name: Bathroom Fan Calibration Gain
+    min: 0.5
+    max: 2
+    step: 0.01
+    mode: box
+    icon: mdi:function-variant
+
+  bathroom_fan_cal_offset:
+    name: Bathroom Fan Calibration Offset
+    min: -20
+    max: 20
+    step: 0.5
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:plus-minus-variant
+
+  # How far the unit may sit from the target before the command is assumed
+  # lost. Keep above the calibration residual, and above ~8 if calibration is
+  # switched off, or the fan will be re-commanded forever.
+  bathroom_fan_mismatch_tolerance:
+    name: Bathroom Fan Mismatch Tolerance
+    min: 2
+    max: 25
+    step: 1
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:not-equal-variant
+
+  # --- cooking boost, driven by the Itho extract-duct sensor ---
+  # Measured cooking ramp is roughly 10% in 10 minutes, so about 1 %/min.
+  cooking_rate_threshold:
+    name: Cooking Rate Threshold
+    min: 0.1
+    max: 3
+    step: 0.05
+    unit_of_measurement: "%/min"
+    mode: box
+    icon: mdi:chart-line-variant
+
+  cooking_rise_above_baseline:
+    name: Cooking Rise Above Baseline
+    min: 1
+    max: 25
+    step: 0.5
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:arrow-expand-up
+
+  cooking_fan_speed:
+    name: Cooking Fan Speed
+    min: 20
+    max: 100
+    step: 5
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:stove
+
+  cooking_minutes:
+    name: Cooking Boost Duration
+    min: 5
+    max: 180
+    step: 5
+    unit_of_measurement: "min"
+    mode: box
+    icon: mdi:timer-outline
+
+# Re-detection restarts this, so the boost stretches to cover a long cook
+# instead of expiring halfway through.
+timer:
+  cooking_boost:
+    name: Cooking Boost
+    icon: mdi:stove
+    duration: "00:30:00"
+    restore: true
+
+# -----------------------------------------------------------------------------
+# Derived sensors
+# -----------------------------------------------------------------------------
+sensor:
+  - platform: derivative
+    source: sensor.itho_humidity
+    name: Itho Humidity Rate
+    unique_id: itho_humidity_rate
+    unit_time: min
+    time_window: "00:10:00"
+    round: 2
+
+  - platform: statistics
+    name: Itho Humidity Baseline
+    unique_id: itho_humidity_baseline
+    entity_id: sensor.itho_humidity
+    state_characteristic: value_min
+    max_age:
+      hours: 3
+    sampling_size: 500
+
+# -----------------------------------------------------------------------------
+# Template sensors
+# -----------------------------------------------------------------------------
+template:
+  - sensor:
+      # Demand before any cap. Kept separate from the target below because the
+      # boost timer keys off demand - deriving it from the capped value would
+      # make the cap feed back into its own trigger.
+      - name: Bathroom Fan Raw Demand
+        unique_id: bathroom_fan_raw_demand
+        unit_of_measurement: "%"
+        icon: mdi:fan-chevron-up
+        state: >
+          {% set excess = states('sensor.bathroom_humidity_above_baseline') | float(0) %}
+          {% set e_lo = states('input_number.bathroom_fan_excess_low') | float(3) %}
+          {% set e_hi = states('input_number.bathroom_fan_excess_high') | float(15) %}
+          {% set s_min = states('input_number.bathroom_fan_base_speed') | float(20) %}
+          {% set s_max = states('input_number.bathroom_fan_max_speed') | float(100) %}
+          {# namespace: a plain set inside an if block would not escape it #}
+          {% set ns = namespace(s = s_min) %}
+          {% if e_hi > e_lo %}
+            {% if excess >= e_hi %}
+              {% set ns.s = s_max %}
+            {% elif excess > e_lo %}
+              {% set ns.s = s_min + (s_max - s_min) * (excess - e_lo) / (e_hi - e_lo) %}
+            {% endif %}
+          {% endif %}
+          {# Extraction should lead the humidity curve, not trail it. #}
+          {% if is_state('input_boolean.bathroom_shower_session', 'on') %}
+            {% set ns.s = [ns.s, states('input_number.bathroom_fan_shower_min_speed') | float(70)] | max %}
+          {% endif %}
+          {# Highest demand wins rather than the two adding up. #}
+          {% if is_state('timer.cooking_boost', 'active') %}
+            {% set ns.s = [ns.s, states('input_number.cooking_fan_speed') | float(60)] | max %}
+          {% endif %}
+          {{ [ns.s, s_max] | min | round(0) }}
+
+      - name: Bathroom Fan Target Speed
+        unique_id: bathroom_fan_target_speed
+        unit_of_measurement: "%"
+        icon: mdi:fan
+        state: >
+          {% set ns = namespace(s = states('sensor.bathroom_fan_raw_demand') | float(20)) %}
+          {% set ts = state_attr('input_datetime.bathroom_fan_boost_started', 'timestamp') | float(0) %}
+          {% set limit = states('input_number.bathroom_fan_boost_minutes') | float(45) %}
+          {% if ts >= 946684800 and ((now().timestamp() - ts) / 60) >= limit %}
+            {% set ns.s = [ns.s, states('input_number.bathroom_fan_boost_cap_speed') | float(50)] | min %}
+          {% endif %}
+          {% set t = now().strftime('%H:%M') %}
+          {% set ns_start = states('input_datetime.bathroom_fan_night_start')[:5] %}
+          {% set ns_end = states('input_datetime.bathroom_fan_night_end')[:5] %}
+          {% set night = (t >= ns_start or t < ns_end) if ns_start > ns_end
+                         else (t >= ns_start and t < ns_end) %}
+          {% if night %}
+            {% set ns.s = [ns.s, states('input_number.bathroom_fan_night_cap_speed') | float(40)] | min %}
+          {% endif %}
+          {{ [ns.s, states('input_number.bathroom_fan_base_speed') | float(20)] | max | round(0) }}
+
+      # What actually gets sent. Inverse of applied = gain * commanded - offset,
+      # so the unit lands on the target rather than a few points under it.
+      - name: Bathroom Fan Commanded Speed
+        unique_id: bathroom_fan_commanded_speed
+        unit_of_measurement: "%"
+        icon: mdi:tune
+        state: >
+          {% set target = states('sensor.bathroom_fan_target_speed') | float(20) %}
+          {% set ns = namespace(v = target) %}
+          {% if is_state('input_boolean.bathroom_fan_calibration', 'on') %}
+            {% set g = states('input_number.bathroom_fan_cal_gain') | float(1.06) %}
+            {% set o = states('input_number.bathroom_fan_cal_offset') | float(6) %}
+            {% set ns.v = (target + o) / (g if g > 0 else 1) %}
+          {% endif %}
+          {{ [[ns.v, 0] | max, 100] | min | round(0) }}
+
+      # How far the unit actually sits from the target. Non-zero for more than
+      # a moment means a command was dropped between here and the I2C bus.
+      - name: Bathroom Fan Mismatch
+        unique_id: bathroom_fan_mismatch
+        unit_of_measurement: "%"
+        icon: mdi:not-equal-variant
+        state: >
+          {% set target = states('sensor.bathroom_fan_target_speed') | float(0) %}
+          {# Falling back to target makes a missing sensor read 0, rather than
+             a huge difference that would resend forever. #}
+          {% set actual = states('sensor.cve_silent_ventilation_setpoint') | float(target) %}
+          {{ (actual - target) | abs | round(1) }}
+
+      - name: Bathroom Fan Boost Elapsed
+        unique_id: bathroom_fan_boost_elapsed
+        unit_of_measurement: "min"
+        icon: mdi:timer-outline
+        state: >
+          {# An unset input_datetime reads 1970 in LOCAL time, so its timestamp
+             is a small negative number rather than 0. Anything before 2000
+             means never set. #}
+          {% set ts = state_attr('input_datetime.bathroom_fan_boost_started', 'timestamp') | float(0) %}
+          {{ 0 if ts < 946684800 else ((now().timestamp() - ts) / 60) | round(1) }}
+
+      - name: Itho Humidity Above Baseline
+        unique_id: itho_humidity_above_baseline
+        unit_of_measurement: "%"
+        icon: mdi:arrow-expand-up
+        availability: >
+          {{ states('sensor.itho_humidity') | is_number
+             and states('sensor.itho_humidity_baseline') | is_number }}
+        state: >
+          {{ (states('sensor.itho_humidity') | float
+              - states('sensor.itho_humidity_baseline') | float) | round(1) }}
+
+# -----------------------------------------------------------------------------
+# Automations
+# -----------------------------------------------------------------------------
+automation:
+  # ---------------------------------------------------------------------------
+  # COOKING BOOST
+  # ---------------------------------------------------------------------------
+  # The Itho sensor sits in the extract duct, so this really means "humidity
+  # rising somewhere that is not the bathroom" - cooking mostly, but a toilet
+  # or drying laundry will trigger it too, which is the desired outcome anyway.
+  - id: ventilation_cooking_detected
+    alias: "Ventilation: cooking detected"
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.itho_humidity_rate
+        above: input_number.cooking_rate_threshold
+      # Level-triggered, so a blocked first crossing is retried and a continuing
+      # cook keeps pushing the timer out.
+      - trigger: time_pattern
+        minutes: "/2"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.cooking_boost_enabled
+        state: "on"
+      - condition: numeric_state
+        entity_id: sensor.itho_humidity_rate
+        above: input_number.cooking_rate_threshold
+      - condition: template
+        value_template: >
+          {% set base = states('sensor.itho_humidity_baseline') %}
+          {% set cur = states('sensor.itho_humidity') | float(0) %}
+          {% set need = states('input_number.cooking_rise_above_baseline') | float(4) %}
+          {{ not (base | is_number) or (cur - (base | float)) >= need }}
+      # A shower also reaches this sensor, but the bathroom curve already asks
+      # for more than the cooking speed, so claiming it here would only hold the
+      # fan up for an extra half hour afterwards.
+      - condition: state
+        entity_id: input_boolean.bathroom_shower_session
+        state: "off"
+    actions:
+      - action: timer.start
+        target:
+          entity_id: timer.cooking_boost
+        data:
+          duration: >
+            {{ (states('input_number.cooking_minutes') | float(30) * 60)
+               | int | timestamp_custom('%H:%M:%S', false) }}
+
+  - id: bathroom_fan_apply_speed
+    alias: "Bathroom fan: apply target speed"
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: state
+        entity_id: sensor.bathroom_fan_target_speed
+      # Level-triggered safety net: picks up night caps, boost expiry and a
+      # dropped command even when the target itself has not moved.
+      - trigger: time_pattern
+        minutes: "/2"
+    conditions:
+      - condition: state
+        entity_id: input_boolean.bathroom_fan_auto
+        state: "on"
+      - condition: or
+        conditions:
+          - condition: template
+            value_template: >
+              {{ ((states('sensor.bathroom_fan_target_speed') | float(0))
+                  - (states('input_number.bathroom_fan_last_commanded') | float(-999))) | abs
+                 >= states('input_number.bathroom_fan_deadband') | float(5) }}
+          - condition: template
+            value_template: >
+              {% set ts = state_attr('input_datetime.bathroom_fan_last_command', 'timestamp') | float(0) %}
+              {% set gap = states('input_number.bathroom_fan_reassert_minutes') | float(30) %}
+              {{ ts < 946684800 or (now().timestamp() - ts) >= gap * 60 }}
+          # The unit never took the last command. Without this the fan would
+          # stay wrong until the re-assert interval came round.
+          - condition: template
+            value_template: >
+              {{ states('sensor.bathroom_fan_mismatch') | float(0)
+                 > states('input_number.bathroom_fan_mismatch_tolerance') | float(5) }}
+      - condition: template
+        value_template: >
+          {% set ts = state_attr('input_datetime.bathroom_fan_last_command', 'timestamp') | float(0) %}
+          {% set gap = states('input_number.bathroom_fan_min_interval_seconds') | float(120) %}
+          {{ ts < 946684800 or (now().timestamp() - ts) >= gap }}
+    actions:
+      - action: fan.set_percentage
+        target:
+          entity_id: fan.cve_silent_fan
+        data:
+          percentage: "{{ states('sensor.bathroom_fan_commanded_speed') | int(20) }}"
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.bathroom_fan_last_commanded
+        data:
+          value: "{{ states('sensor.bathroom_fan_target_speed') | int(20) }}"
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.bathroom_fan_last_command
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
+  - id: bathroom_fan_boost_start
+    alias: "Bathroom fan: mark boost start"
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.bathroom_fan_raw_demand
+        above: input_number.bathroom_fan_boost_cap_speed
+      - trigger: time_pattern
+        minutes: "/5"
+    conditions:
+      - condition: numeric_state
+        entity_id: sensor.bathroom_fan_raw_demand
+        above: input_number.bathroom_fan_boost_cap_speed
+      # Only the first crossing starts the clock.
+      - condition: template
+        value_template: >
+          {{ (state_attr('input_datetime.bathroom_fan_boost_started', 'timestamp') | float(0)) < 946684800 }}
+    actions:
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.bathroom_fan_boost_started
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+
+  # Clearing on sustained low demand means a second shower gets a fresh boost
+  # allowance rather than inheriting the previous one.
+  - id: bathroom_fan_boost_reset
+    alias: "Bathroom fan: clear boost clock"
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: numeric_state
+        entity_id: sensor.bathroom_fan_raw_demand
+        below: input_number.bathroom_fan_boost_cap_speed
+        for: "00:10:00"
+    conditions:
+      - condition: template
+        value_template: >
+          {{ (state_attr('input_datetime.bathroom_fan_boost_started', 'timestamp') | float(0)) >= 946684800 }}
+    actions:
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.bathroom_fan_boost_started
+        data:
+          datetime: "1970-01-01 00:00:00"

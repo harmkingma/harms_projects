@@ -1,0 +1,2 @@
+# One Windows ESPHome distribution shared by every device.
+-r 'locks\esphome-windows.txt'

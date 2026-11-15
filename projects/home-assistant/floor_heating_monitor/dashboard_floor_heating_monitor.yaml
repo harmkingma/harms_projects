@@ -1,0 +1,203 @@
+# Floor Heating Monitor Dashboard — complete raw configuration
+#
+# Setup: Settings -> Dashboards -> Add dashboard -> "New dashboard from scratch"
+#        name it e.g. "Floor Heating", open it -> Edit Dashboard -> 3-dot menu
+#        -> Raw configuration editor -> SELECT ALL, DELETE, paste this entire file.
+#
+# To add this as an extra view to an existing dashboard instead, paste only the
+# "- title: Floor Heating" block below as a new entry under the existing views:.
+#
+# Uses built-in cards only. The trend graphs read long-term statistics of the
+# rolling 24 h sensors, so they keep growing beyond the recorder purge window.
+
+views:
+  - title: Floor Heating
+    path: floor-heating
+    icon: mdi:heating-coil
+    cards:
+      # -----------------------------------------------------------------------
+      - type: conditional
+        conditions:
+          - condition: or
+            conditions:
+              - condition: state
+                entity: sensor.floor_heating_supply_temperature
+                state: unavailable
+              - condition: state
+                entity: sensor.floor_heating_return_temperature
+                state: unavailable
+        card:
+          type: markdown
+          content: >
+            ## <ha-icon icon="mdi:thermometer-alert"></ha-icon> Pipe sensor offline
+
+            The hallway ESPHome temperature monitor is not reporting one or both
+            pipe temperatures. Statistics pause until it returns.
+
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: binary_sensor.floor_heating_sensors_swapped
+            state: "on"
+        card:
+          type: markdown
+          content: >
+            ## <ha-icon icon="mdi:swap-vertical"></ha-icon> Supply and return swapped?
+
+            The return pipe reads warmer than the supply while the circuit is warm.
+            Turn on **Swap Supply / Return Sensors** under *Settings*.
+
+      # -----------------------------------------------------------------------
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.floor_heating_delta_t
+            name: Delta T now
+            unit: K
+            min: 0
+            max: 10
+            needle: true
+            segments:
+              - from: 0
+                color: "#ffa600"
+              - from: 2
+                color: "#43a047"
+              - from: 7
+                color: "#db4437"
+          - type: conditional
+            conditions:
+              - condition: numeric_state
+                entity: sensor.floor_heating_delta_t_std_1h
+                above: -1
+            card:
+              type: gauge
+              entity: sensor.floor_heating_delta_t_std_1h
+              name: Delta T σ (1 h)
+              unit: K
+              min: 0
+              max: 2
+              needle: true
+              segments:
+                - from: 0
+                  color: "#43a047"
+                - from: 0.5
+                  color: "#ffa600"
+                - from: 1
+                  color: "#db4437"
+
+      - type: grid
+        columns: 2
+        square: false
+        cards:
+          - type: tile
+            entity: sensor.floor_heating_supply_temperature
+            name: Supply
+          - type: tile
+            entity: sensor.floor_heating_return_temperature
+            name: Return
+          - type: tile
+            entity: binary_sensor.floor_heating_active
+            name: Circuit
+          - type: tile
+            entity: sensor.floor_heating_delta_t_mean_1h
+            name: Delta T 1 h mean
+
+      # -----------------------------------------------------------------------
+      - type: history-graph
+        title: Pipe Temperatures (24 h)
+        hours_to_show: 24
+        entities:
+          - entity: sensor.floor_heating_supply_temperature
+            name: Distributor supply
+          - entity: sensor.floor_heating_return_temperature
+            name: Distributor return
+
+      - type: history-graph
+        title: Delta T (24 h)
+        hours_to_show: 24
+        entities:
+          - entity: sensor.floor_heating_delta_t
+            name: Distributor
+          - entity: sensor.floor_heating_delta_t_mean_1h
+            name: Distributor 1 h mean
+          - entity: binary_sensor.floor_heating_active
+            name: Circuit running
+
+      # -----------------------------------------------------------------------
+      - type: markdown
+        title: Delta T Statistics (circuit running)
+        content: |-
+          {%- macro k(e) -%}{{ (states(e) | float | round(2) ~ ' K') if states(e) | is_number else '–' }}{%- endmacro -%}
+          {%- set m = states('sensor.floor_heating_delta_t_mean_24h') | float(none) -%}
+          {%- set cv = states('sensor.floor_heating_delta_t_cv_24h') | float(none) -%}
+          | Window | Mean | Std dev σ | 5th pct | 95th pct |
+          |---|---:|---:|---:|---:|
+          | Last hour | {{ k('sensor.floor_heating_delta_t_mean_1h') }} | {{ k('sensor.floor_heating_delta_t_std_1h') }} | | |
+          | Last 24 h | {{ k('sensor.floor_heating_delta_t_mean_24h') }} | {{ k('sensor.floor_heating_delta_t_std_24h') }} | {{ k('sensor.floor_heating_delta_t_p05_24h') }} | {{ k('sensor.floor_heating_delta_t_p95_24h') }} |
+
+          {% if m is none -%}
+          *The circuit has not run in the last 24 hours.*
+          {%- else -%}
+          **Level:** {{ m | round(1) }} K — {% if m < 2 %}low: flow is high for the current load, or the load is very small.{% elif m <= 7 %}within the usual floor heating range (designed for 3–7 K, often 5 K).{% else %}high: flow is low or loops are unbalanced, so the heat pump needs a hotter supply.{% endif %}
+
+          {% if cv is not none -%}
+          **Stability:** σ is {{ cv | round(0) }} % of the mean — {% if cv < 10 %}stable, steady modulation.{% elif cv < 25 %}moderate.{% else %}unstable: look for on/off cycling, defrosts or room thermostats closing loops.{% endif %}
+          {%- endif %}
+          {%- endif %}
+
+      - type: entities
+        title: Operation
+        show_header_toggle: false
+        entities:
+          - entity: binary_sensor.floor_heating_active
+            name: Circuit Running
+          - entity: sensor.floor_heating_runtime_today
+            name: Runtime Today
+          - entity: sensor.floor_heating_duty_cycle_24h
+            name: Duty Cycle (24 h)
+          - entity: sensor.floor_heating_cycles_24h
+            name: Run Cycles (24 h)
+          - entity: sensor.floor_heating_average_run_length
+            name: Average Run Length (24 h)
+
+      # -----------------------------------------------------------------------
+      - type: statistics-graph
+        title: Delta T Trend (daily)
+        entities:
+          - entity: sensor.floor_heating_delta_t_mean_24h
+            name: Mean (24 h)
+          - entity: sensor.floor_heating_delta_t_std_24h
+            name: Std dev σ (24 h)
+        stat_types:
+          - mean
+        period: day
+        days_to_show: 30
+        chart_type: line
+
+      # -----------------------------------------------------------------------
+      - type: entities
+        title: Settings
+        show_header_toggle: false
+        entities:
+          - type: section
+            label: Pipe sensors
+          - entity: input_boolean.fh_swap_sensors
+            name: Swap Supply / Return Sensors
+          - entity: input_number.fh_supply_offset
+            name: Supply Offset
+          - entity: input_number.fh_return_offset
+            name: Return Offset
+          - type: section
+            label: Running detection
+          - entity: input_number.fh_min_delta_t
+            name: Min. Delta T
+          - entity: input_number.fh_min_supply_temp
+            name: Min. Supply Temperature
+          - entity: input_number.fh_running_delay
+            name: Running Delay
+          - type: section
+            label: Alerts
+          - entity: input_boolean.fh_alerts_enabled
+            name: Alerts Enabled
+          - entity: input_number.fh_max_delta_t_std
+            name: Max. Delta T σ (1 h)

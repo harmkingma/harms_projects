@@ -1,0 +1,458 @@
+# =============================================================================
+# EV Battery Health Package - Tesla Model 3 Premium RWD, 60 kWh LFP
+# =============================================================================
+# Read-only monitor. It never commands the car or the charger and does not
+# touch the EV charging package; both can run side by side.
+#
+# Requires Home Assistant 2024.10+ (modern triggers/conditions/actions syntax).
+#
+# Tesla Fleet entity IDs assumed (find-and-replace here if yours differ):
+#   sensor.life_the_universe_and_everything_battery_level
+#   sensor.life_the_universe_and_everything_charge_energy_added
+#   sensor.life_the_universe_and_everything_charging
+#   sensor.life_the_universe_and_everything_odometer          (disabled by default)
+#   sensor.life_the_universe_and_everything_outside_temperature
+#   sensor.life_the_universe_and_everything_battery_range
+#   binary_sensor.life_the_universe_and_everything_charge_cable
+#
+# HOW THE ESTIMATE WORKS
+#   usable capacity (kWh) = energy added (kWh) / (SOC gained / 100)
+#
+# Tesla Fleet polls about every 10 minutes while the car is awake. Each poll is
+# a snapshot of SOC and charge energy added. During a plug-in session the
+# deltas between consecutive snapshots are summed, so a measurement does not
+# depend on catching the exact start or end of charging. The energy counter
+# resets when the car starts a new charge session (e.g. a solar pause and
+# resume); a decrease is treated as a reset and that one interval is skipped.
+#
+# A session ends on unplug, when the odometer moves, when SOC drops more than
+# 2 points between snapshots, or after 7 days. It is then accepted or rejected
+# against the quality settings below, and every outcome is listed with its
+# reason in sensor.ev_battery_health_history.
+#
+# LFP NOTE
+# LFP has a very flat voltage curve, so the BMS SOC drifts between full
+# charges and is recalibrated at 100%. Sessions starting long after the last
+# 100% charge are less reliable and can be rejected via "Max Days Since 100%".
+#
+# PERSISTENCE
+# Trigger-based template sensors restore their attributes after a restart only
+# when their last state was not unknown/unavailable. The history is therefore
+# kept on a sensor whose state is the sample count, which is always a number.
+# Do not rename sensor.ev_battery_health_measurement or
+# sensor.ev_battery_health_history: the templates read their own last values
+# from these entity IDs.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Settings
+# -----------------------------------------------------------------------------
+input_boolean:
+  # Set by the defaults automation, so the settings below are initialised once
+  # and later edits survive restarts.
+  ev_bh_initialised:
+    name: EV Battery Health Initialised
+    icon: mdi:check-decagram
+
+input_number:
+  # Usable capacity of the new pack. SOH = estimated capacity / this value.
+  ev_bh_reference_capacity:
+    name: EV BH Reference Usable Capacity
+    min: 40
+    max: 100
+    step: 0.1
+    unit_of_measurement: kWh
+    mode: box
+    icon: mdi:battery-high
+
+  # Rounding of the integer SOC dominates small sessions: one point on a
+  # 30-point session is a 3% capacity error.
+  ev_bh_min_soc_gain:
+    name: EV BH Min. SOC Gain
+    min: 10
+    max: 80
+    step: 1
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:battery-arrow-up
+
+  ev_bh_min_outside_temp:
+    name: EV BH Min. Outside Temperature
+    min: -20
+    max: 25
+    step: 1
+    unit_of_measurement: "°C"
+    mode: box
+    icon: mdi:thermometer-low
+
+  ev_bh_max_days_since_full:
+    name: EV BH Max. Days Since 100%
+    min: 1
+    max: 60
+    step: 1
+    unit_of_measurement: d
+    mode: box
+    icon: mdi:calendar-sync
+
+# -----------------------------------------------------------------------------
+# Measurement state machine and history
+# -----------------------------------------------------------------------------
+template:
+  - triggers:
+      - trigger: state
+        id: car
+        entity_id:
+          - sensor.life_the_universe_and_everything_battery_level
+          - sensor.life_the_universe_and_everything_charge_energy_added
+          - sensor.life_the_universe_and_everything_charging
+          - sensor.life_the_universe_and_everything_odometer
+          - sensor.life_the_universe_and_everything_outside_temperature
+          - binary_sensor.life_the_universe_and_everything_charge_cable
+        # State changes only; attribute-only updates are ignored.
+        to: ~
+      - trigger: event
+        id: command
+        event_type: ev_battery_health_command
+    actions:
+      - variables:
+          bh: >-
+            {%- set soc_id = 'sensor.life_the_universe_and_everything_battery_level' -%}
+            {%- set kwh_id = 'sensor.life_the_universe_and_everything_charge_energy_added' -%}
+            {%- set charging_id = 'sensor.life_the_universe_and_everything_charging' -%}
+            {%- set odo_id = 'sensor.life_the_universe_and_everything_odometer' -%}
+            {%- set temp_id = 'sensor.life_the_universe_and_everything_outside_temperature' -%}
+            {%- set cable_id = 'binary_sensor.life_the_universe_and_everything_charge_cable' -%}
+            {%- set meas_id = 'sensor.ev_battery_health_measurement' -%}
+            {%- set hist_id = 'sensor.ev_battery_health_history' -%}
+
+            {%- set ts = now().timestamp() | int -%}
+            {%- set soc = states(soc_id) | float(none) -%}
+            {%- set kwh = states(kwh_id) | float(none) -%}
+            {%- set odo = states(odo_id) | float(none) -%}
+            {%- if odo is not none and state_attr(odo_id, 'unit_of_measurement') == 'mi' -%}
+              {%- set odo = odo * 1.609344 -%}
+            {%- endif -%}
+            {%- set temp = states(temp_id) | float(none) -%}
+            {%- if temp is not none and state_attr(temp_id, 'unit_of_measurement') == '°F' -%}
+              {%- set temp = (temp - 32) / 1.8 -%}
+            {%- endif -%}
+            {%- set cable = states(cable_id) -%}
+            {%- set charging = states(charging_id) -%}
+            {%- set cmd = (trigger.event.data.command | default('')) if trigger.id == 'command' else '' -%}
+
+            {%- set ref = states('input_number.ev_bh_reference_capacity') | float(60) -%}
+            {%- set min_gain = states('input_number.ev_bh_min_soc_gain') | float(30) -%}
+            {%- set min_temp = states('input_number.ev_bh_min_outside_temp') | float(5) -%}
+            {%- set max_days = states('input_number.ev_bh_max_days_since_full') | float(14) -%}
+
+            {%- set prev_session = state_attr(meas_id, 'session') -%}
+            {%- set prev_samples = state_attr(hist_id, 'samples') -%}
+            {%- set prev_recent = state_attr(hist_id, 'recent_sessions') -%}
+            {%- set ns = namespace(
+                  s=prev_session if prev_session is mapping else {'phase': 'idle'},
+                  samples=prev_samples if prev_samples is list else [],
+                  recent=prev_recent if prev_recent is list else [],
+                  baseline=state_attr(hist_id, 'baseline_kwh'),
+                  baseline_date=state_attr(hist_id, 'baseline_date'),
+                  last_full=state_attr(meas_id, 'last_full_charge_ts') | int(0),
+                  end='') -%}
+
+            {#- Own record of the last 100%, with the charging package's helper as a
+                read-only fallback so the first days after install have a value. -#}
+            {%- if soc is not none and soc >= 100 -%}
+              {%- set ns.last_full = ts -%}
+            {%- endif -%}
+            {%- set ns.last_full = [ns.last_full,
+                  state_attr('input_datetime.ev_last_full_charge', 'timestamp') | int(0)] | max -%}
+
+            {%- if cmd == 'clear_history' -%}
+              {%- set ns.s = {'phase': 'idle'} -%}
+              {%- set ns.samples = [] -%}
+              {%- set ns.recent = [] -%}
+              {%- set ns.baseline = none -%}
+              {%- set ns.baseline_date = none -%}
+            {%- elif cmd == 'discard' and ns.s.get('phase') == 'measuring' -%}
+              {%- set ns.end = 'discarded' -%}
+            {%- elif cmd == '' and ns.s.get('phase') == 'measuring' -%}
+              {%- if cable == 'off' -%}
+                {%- set ns.end = 'unplugged' -%}
+              {%- elif odo is not none and ns.s.get('start_odo') is number and odo > ns.s.start_odo + 0.5 -%}
+                {%- set ns.end = 'drove' -%}
+              {%- elif soc is not none and soc < ns.s.prev_soc - 2 -%}
+                {%- set ns.end = 'soc dropped' -%}
+              {%- elif ts - ns.s.start_ts > 7 * 86400 -%}
+                {%- set ns.end = 'timeout' -%}
+              {%- endif -%}
+            {%- endif -%}
+
+            {%- if ns.end -%}
+              {%- set m = ns.s -%}
+              {%- set cap = (m.acc_kwh / m.acc_soc * 100) | round(2) if m.acc_soc > 0 and m.acc_kwh > 0 else none -%}
+              {%- set ns.why = [] -%}
+              {%- if ns.end == 'discarded' -%}
+                {%- set ns.why = ns.why + ['discarded manually'] -%}
+              {%- endif -%}
+              {%- if m.acc_soc < min_gain -%}
+                {%- set ns.why = ns.why + ['SOC gain ' ~ m.acc_soc | int ~ ' < ' ~ min_gain | int ~ ' %'] -%}
+              {%- endif -%}
+              {%- if m.tmin is number and m.tmin < min_temp -%}
+                {%- set ns.why = ns.why + ['outside ' ~ m.tmin | round(1) ~ ' < ' ~ min_temp | int ~ ' °C'] -%}
+              {%- endif -%}
+              {%- if m.dsf is number and m.dsf > max_days -%}
+                {%- set ns.why = ns.why + [m.dsf ~ ' d since 100% > ' ~ max_days | int ~ ' d'] -%}
+              {%- endif -%}
+              {%- if cap is none -%}
+                {%- set ns.why = ns.why + ['no energy recorded'] -%}
+              {%- elif cap < 0.6 * ref or cap > 1.15 * ref -%}
+                {%- set ns.why = ns.why + ['implausible ' ~ cap ~ ' kWh'] -%}
+              {%- endif -%}
+              {%- set sample = {
+                    't': m.start_ts,
+                    'date': m.start_ts | timestamp_custom('%Y-%m-%d %H:%M'),
+                    'soc0': m.start_soc,
+                    'soc1': m.end_soc,
+                    'gain': m.acc_soc,
+                    'kwh': m.acc_kwh | round(2),
+                    'cap': cap,
+                    'odo': m.start_odo | round(0) if m.start_odo is number else none,
+                    'tmin': m.tmin | round(1) if m.tmin is number else none,
+                    'dsf': m.dsf,
+                    'full': m.end_soc >= 100,
+                    'resets': m.resets} -%}
+              {%- set ok = ns.why | count == 0 -%}
+              {%- set ns.recent = (ns.recent + [dict(sample, ok=ok, end=ns.end, why=ns.why | join('; '))])[-15:] -%}
+              {%- if ok -%}
+                {%- set ns.samples = (ns.samples + [sample])[-50:] -%}
+                {%- if ns.baseline is none and ns.samples | count >= 5 -%}
+                  {%- set ns.baseline = ns.samples[:5] | map(attribute='cap') | list | median | round(2) -%}
+                  {%- set ns.baseline_date = ns.samples[4].date -%}
+                {%- endif -%}
+              {%- endif -%}
+              {%- set ns.s = {'phase': 'idle'} -%}
+            {%- endif -%}
+
+            {%- if cmd == '' and soc is not none and kwh is not none -%}
+              {%- set m = ns.s -%}
+              {%- if m.get('phase') == 'measuring' -%}
+                {%- if kwh < m.prev_kwh - 0.01 -%}
+                  {%- set ns.s = dict(m, prev_soc=soc, prev_kwh=kwh, end_soc=soc, last_ts=ts, resets=m.resets + 1) -%}
+                {%- else -%}
+                  {%- set ns.s = dict(m, prev_soc=soc, prev_kwh=kwh, end_soc=soc, last_ts=ts,
+                        acc_soc=m.acc_soc + soc - m.prev_soc,
+                        acc_kwh=(m.acc_kwh + kwh - m.prev_kwh) | round(3)) -%}
+                {%- endif -%}
+              {%- elif cable == 'on' and charging in ['charging', 'starting'] -%}
+                {%- set ns.s = {
+                      'phase': 'measuring',
+                      'start_ts': ts,
+                      'last_ts': ts,
+                      'start_soc': soc,
+                      'end_soc': soc,
+                      'prev_soc': soc,
+                      'prev_kwh': kwh,
+                      'acc_soc': 0,
+                      'acc_kwh': 0,
+                      'start_odo': odo,
+                      'tmin': none,
+                      'dsf': ((ts - ns.last_full) / 86400) | round(1) if ns.last_full > 0 else none,
+                      'resets': 0} -%}
+              {%- endif -%}
+            {%- endif -%}
+
+            {%- if ns.s.get('phase') == 'measuring' and temp is not none
+                  and (ns.s.tmin is not number or temp < ns.s.tmin) -%}
+              {%- set ns.s = dict(ns.s, tmin=temp | round(1)) -%}
+            {%- endif -%}
+
+            {{- {
+                  'session': ns.s,
+                  'last_full': ns.last_full if ns.last_full > 0 else none,
+                  'samples': ns.samples,
+                  'recent': ns.recent,
+                  'baseline': ns.baseline,
+                  'baseline_date': ns.baseline_date} -}}
+    sensor:
+      # No availability templates on these two: an unavailable state drops the
+      # attributes, and they would then not be restored after a restart.
+      - name: EV Battery Health Measurement
+        unique_id: ev_battery_health_measurement
+        icon: mdi:battery-sync
+        state: "{{ bh.session.phase }}"
+        attributes:
+          session: "{{ bh.session }}"
+          last_full_charge_ts: "{{ bh.last_full }}"
+
+      - name: EV Battery Health History
+        unique_id: ev_battery_health_history
+        icon: mdi:database
+        state: "{{ bh.samples | count }}"
+        attributes:
+          samples: "{{ bh.samples }}"
+          recent_sessions: "{{ bh.recent }}"
+          baseline_kwh: "{{ bh.baseline }}"
+          baseline_date: "{{ bh.baseline_date }}"
+
+  # Rated range scaled to 100%. A BMS-derived cross-check, not an independent
+  # capacity test. Only taken at >= 60% SOC to limit integer-SOC rounding error.
+  - triggers:
+      - trigger: state
+        entity_id:
+          - sensor.life_the_universe_and_everything_battery_range
+          - sensor.life_the_universe_and_everything_battery_level
+        to: ~
+    sensor:
+      - name: EV Battery Range at 100%
+        unique_id: ev_battery_range_at_full
+        icon: mdi:map-marker-distance
+        device_class: distance
+        unit_of_measurement: km
+        state_class: measurement
+        state: >-
+          {%- set range_id = 'sensor.life_the_universe_and_everything_battery_range' -%}
+          {%- set soc = states('sensor.life_the_universe_and_everything_battery_level') | float(0) -%}
+          {%- set rng = states(range_id) | float(none) -%}
+          {%- if rng is not none and soc >= 60 -%}
+            {%- if state_attr(range_id, 'unit_of_measurement') == 'mi' -%}
+              {%- set rng = rng * 1.609344 -%}
+            {%- endif -%}
+            {{- (rng / soc * 100) | round(0) -}}
+          {%- elif this.state | is_number -%}
+            {{- this.state -}}
+          {%- else -%}
+            {{- none -}}
+          {%- endif -%}
+
+  # ---------------------------------------------------------------------------
+  # Derived estimates
+  # ---------------------------------------------------------------------------
+  - sensor:
+      # Median of the last 10 accepted sessions; robust to a single bad session.
+      - name: EV Battery Usable Capacity
+        unique_id: ev_battery_usable_capacity
+        icon: mdi:battery-heart-variant
+        device_class: energy_storage
+        unit_of_measurement: kWh
+        state_class: measurement
+        state: >-
+          {%- set caps = (state_attr('sensor.ev_battery_health_history', 'samples') or [])[-10:]
+                | map(attribute='cap') | list -%}
+          {{- (caps | median) | round(2) if caps | count >= 3 else none -}}
+        attributes:
+          window: >-
+            {{- ((state_attr('sensor.ev_battery_health_history', 'samples') or [])[-10:]) | count -}}
+          # Median absolute deviation of the window: typical session scatter.
+          spread_kwh: >-
+            {%- set caps = (state_attr('sensor.ev_battery_health_history', 'samples') or [])[-10:]
+                  | map(attribute='cap') | list -%}
+            {%- if caps | count >= 3 -%}
+              {%- set med = caps | median -%}
+              {%- set ns = namespace(dev=[]) -%}
+              {%- for c in caps -%}
+                {%- set ns.dev = ns.dev + [(c - med) | abs] -%}
+              {%- endfor -%}
+              {{- (ns.dev | median) | round(2) -}}
+            {%- else -%}
+              {{- none -}}
+            {%- endif -%}
+          last_sample: >-
+            {%- set s = state_attr('sensor.ev_battery_health_history', 'samples') or [] -%}
+            {{- s[-1].date if s else none -}}
+
+      - name: EV Battery SOH
+        unique_id: ev_battery_soh
+        icon: mdi:battery-heart-outline
+        unit_of_measurement: "%"
+        state_class: measurement
+        state: >-
+          {%- set cap = states('sensor.ev_battery_usable_capacity') | float(none) -%}
+          {%- set ref = states('input_number.ev_bh_reference_capacity') | float(0) -%}
+          {{- (cap / ref * 100) | round(1) if cap is not none and ref > 0 else none -}}
+        attributes:
+          reference_kwh: "{{ states('input_number.ev_bh_reference_capacity') | float(0) }}"
+
+      - name: EV Battery Capacity Change
+        unique_id: ev_battery_capacity_change
+        icon: mdi:delta
+        unit_of_measurement: "%"
+        state_class: measurement
+        state: >-
+          {%- set cap = states('sensor.ev_battery_usable_capacity') | float(none) -%}
+          {%- set base = state_attr('sensor.ev_battery_health_history', 'baseline_kwh') -%}
+          {{- ((cap / base - 1) * 100) | round(1) if cap is not none and base is number and base > 0 else none -}}
+        attributes:
+          baseline_kwh: "{{ state_attr('sensor.ev_battery_health_history', 'baseline_kwh') }}"
+          baseline_date: "{{ state_attr('sensor.ev_battery_health_history', 'baseline_date') }}"
+
+      # One value per accepted session, for the scatter behind the median.
+      - name: EV Battery Capacity Last Session
+        unique_id: ev_battery_capacity_last_session
+        icon: mdi:battery-clock
+        device_class: energy_storage
+        unit_of_measurement: kWh
+        state_class: measurement
+        state: >-
+          {%- set s = state_attr('sensor.ev_battery_health_history', 'samples') or [] -%}
+          {{- s[-1].cap if s else none -}}
+
+# -----------------------------------------------------------------------------
+# Scripts
+# -----------------------------------------------------------------------------
+script:
+  ev_bh_discard_measurement:
+    alias: "EV Battery Health: discard current measurement"
+    icon: mdi:delete-clock
+    sequence:
+      - event: ev_battery_health_command
+        event_data:
+          command: discard
+
+  ev_bh_clear_history:
+    alias: "EV Battery Health: clear all history"
+    icon: mdi:delete-forever
+    sequence:
+      - event: ev_battery_health_command
+        event_data:
+          command: clear_history
+
+# -----------------------------------------------------------------------------
+# Automations
+# -----------------------------------------------------------------------------
+automation:
+  # input_number has no persistent default: without "initial" it starts at its
+  # minimum, with "initial" every restart overwrites the user's value.
+  - id: ev_bh_initialise_settings
+    alias: "EV Battery Health: initialise settings"
+    mode: single
+    triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: automation_reloaded
+    conditions:
+      - condition: state
+        entity_id: input_boolean.ev_bh_initialised
+        state: "off"
+    actions:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.ev_bh_reference_capacity
+        data:
+          value: 60.0
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.ev_bh_min_soc_gain
+        data:
+          value: 30
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.ev_bh_min_outside_temp
+        data:
+          value: 5
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.ev_bh_max_days_since_full
+        data:
+          value: 14
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.ev_bh_initialised

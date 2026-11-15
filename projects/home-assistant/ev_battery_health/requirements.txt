@@ -1,0 +1,3 @@
+# No runtime Python dependencies: the package runs inside Home Assistant.
+# The test suite's dependencies are in requirements-dev.txt
+# (install with: install_requirements.bat dev).

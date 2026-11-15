@@ -1,0 +1,49 @@
+{
+  "folders": [
+    { "name": "Harms Projects", "path": "." }
+  ],
+  "settings": {
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/.pytest_cache": true,
+      "**/.esphome": true,
+      ".venvs": true,
+      "local/source-snapshots": true
+    },
+    "search.exclude": {
+      ".venvs": true,
+      "local": true,
+      "chats/raw": true,
+      "projects/espcam-water/dataset": true,
+      "projects/espcam-water/addon/water_meter_reader/app": true
+    },
+    "python.defaultInterpreterPath": "${workspaceFolder}\\.venvs\\watermeter\\Scripts\\python.exe"
+  },
+  "tasks": {
+    "version": "2.0.0",
+    "tasks": [
+      {
+        "label": "ESPHome: validate water meter",
+        "type": "shell",
+        "command": "${workspaceFolder}\\tools\\esphome.cmd",
+        "args": ["config", "${workspaceFolder}\\projects\\esphome\\espcam-water\\espcam-water.yaml"],
+        "problemMatcher": []
+      },
+      {
+        "label": "ESPHome: validate dual temperature",
+        "type": "shell",
+        "command": "${workspaceFolder}\\tools\\esphome.cmd",
+        "args": ["config", "${workspaceFolder}\\projects\\esphome\\floorheating-temp-monitor\\feather-temp.yaml"],
+        "problemMatcher": []
+      },
+      {
+        "label": "Water meter: tests",
+        "type": "process",
+        "command": "${workspaceFolder}\\.venvs\\watermeter\\Scripts\\python.exe",
+        "args": ["-m", "pytest", "-q"],
+        "options": { "cwd": "${workspaceFolder}\\projects\\espcam-water\\cv" },
+        "problemMatcher": []
+      }
+    ]
+  }
+}

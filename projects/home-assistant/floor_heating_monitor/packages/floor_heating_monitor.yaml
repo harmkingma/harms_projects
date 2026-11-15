@@ -1,0 +1,471 @@
+# =============================================================================
+# Floor Heating Monitor Package - distributor supply/return temperatures
+# =============================================================================
+# Read-only monitor. It never commands the heat pump or the distributor.
+#
+# Requires Home Assistant 2024.10+ (modern triggers/conditions/actions syntax).
+#
+# ESPHome entity IDs assumed (find-and-replace here if yours differ):
+#   sensor.hallway_dual_temperature_monitor_heatpump_temperature_1   supply
+#   sensor.hallway_dual_temperature_monitor_heatpump_temperature_2   return
+# If the return pipe reads warmer than the supply while the circuit is warm,
+# binary_sensor.floor_heating_sensors_swapped turns on. Flip
+# input_boolean.fh_swap_sensors instead of editing this file.
+#
+# RUNNING DETECTION
+# Delta T statistics only make sense while water flows. The circuit counts as
+# running when delta T >= "Min. Delta T" and supply >= "Min. Supply Temp." for
+# "Running Delay" minutes, which also skips the start-up transient. All delta T
+# statistics use samples from running periods only: idle periods are reported
+# as unknown, and the statistics integration skips unknown samples.
+#
+# ACCURACY
+# Typical pipe sensors (e.g. DS18B20) are +/-0.5 °C each, so an uncalibrated
+# delta T can be off by up to 1 K. Calibrate once: with both sensors at the
+# same temperature (e.g. strapped to the same pipe for an hour), set the
+# offsets so both read the same. Clamp-on sensors read below the water
+# temperature; insulate them.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Settings
+# -----------------------------------------------------------------------------
+input_boolean:
+  # Set by the defaults automation, so the settings below are initialised once
+  # and later edits survive restarts.
+  fh_initialised:
+    name: FH Monitor Initialised
+    icon: mdi:check-decagram
+
+  fh_swap_sensors:
+    name: FH Swap Supply/Return Sensors
+    icon: mdi:swap-vertical
+
+  fh_alerts_enabled:
+    name: FH Alerts Enabled
+    icon: mdi:bell-ring
+
+input_number:
+  fh_supply_offset:
+    name: FH Supply Offset
+    min: -3
+    max: 3
+    step: 0.05
+    unit_of_measurement: K
+    mode: box
+    icon: mdi:thermometer-plus
+
+  fh_return_offset:
+    name: FH Return Offset
+    min: -3
+    max: 3
+    step: 0.05
+    unit_of_measurement: K
+    mode: box
+    icon: mdi:thermometer-plus
+
+  fh_min_delta_t:
+    name: FH Min. Delta T (running)
+    min: 0.2
+    max: 5
+    step: 0.1
+    unit_of_measurement: K
+    mode: box
+    icon: mdi:delta
+
+  fh_min_supply_temp:
+    name: FH Min. Supply Temp. (running)
+    min: 15
+    max: 45
+    step: 0.5
+    unit_of_measurement: "°C"
+    mode: box
+    icon: mdi:thermometer-low
+
+  # A new value applies from the next start of the circuit.
+  fh_running_delay:
+    name: FH Running Delay
+    min: 0
+    max: 30
+    step: 1
+    unit_of_measurement: min
+    mode: box
+    icon: mdi:timer-sand
+
+  fh_max_delta_t_std:
+    name: FH Max. Delta T Std Dev (alert)
+    min: 0.1
+    max: 5
+    step: 0.1
+    unit_of_measurement: K
+    mode: box
+    icon: mdi:chart-bell-curve
+
+# -----------------------------------------------------------------------------
+# Live values
+# -----------------------------------------------------------------------------
+template:
+  - sensor:
+      - name: Floor Heating Supply Temperature
+        unique_id: floor_heating_supply_temperature
+        device_class: temperature
+        state_class: measurement
+        unit_of_measurement: "°C"
+        icon: mdi:thermometer-chevron-up
+        availability: >-
+          {%- set src = 'sensor.hallway_dual_temperature_monitor_heatpump_temperature_2'
+                if is_state('input_boolean.fh_swap_sensors', 'on')
+                else 'sensor.hallway_dual_temperature_monitor_heatpump_temperature_1' -%}
+          {{ states(src) | is_number }}
+        state: >-
+          {%- set src = 'sensor.hallway_dual_temperature_monitor_heatpump_temperature_2'
+                if is_state('input_boolean.fh_swap_sensors', 'on')
+                else 'sensor.hallway_dual_temperature_monitor_heatpump_temperature_1' -%}
+          {%- set v = states(src) | float(none) -%}
+          {{ (v + states('input_number.fh_supply_offset') | float(0)) | round(2) if v is not none else none }}
+
+      - name: Floor Heating Return Temperature
+        unique_id: floor_heating_return_temperature
+        device_class: temperature
+        state_class: measurement
+        unit_of_measurement: "°C"
+        icon: mdi:thermometer-chevron-down
+        availability: >-
+          {%- set src = 'sensor.hallway_dual_temperature_monitor_heatpump_temperature_1'
+                if is_state('input_boolean.fh_swap_sensors', 'on')
+                else 'sensor.hallway_dual_temperature_monitor_heatpump_temperature_2' -%}
+          {{ states(src) | is_number }}
+        state: >-
+          {%- set src = 'sensor.hallway_dual_temperature_monitor_heatpump_temperature_1'
+                if is_state('input_boolean.fh_swap_sensors', 'on')
+                else 'sensor.hallway_dual_temperature_monitor_heatpump_temperature_2' -%}
+          {%- set v = states(src) | float(none) -%}
+          {{ (v + states('input_number.fh_return_offset') | float(0)) | round(2) if v is not none else none }}
+
+      # A temperature difference must not get device_class temperature: HA would
+      # convert it as an absolute temperature.
+      - name: Floor Heating Delta T
+        unique_id: floor_heating_delta_t
+        state_class: measurement
+        unit_of_measurement: K
+        icon: mdi:delta
+        availability: >-
+          {{ has_value('sensor.floor_heating_supply_temperature')
+             and has_value('sensor.floor_heating_return_temperature') }}
+        state: >-
+          {%- set s = states('sensor.floor_heating_supply_temperature') | float(none) -%}
+          {%- set r = states('sensor.floor_heating_return_temperature') | float(none) -%}
+          {{ (s - r) | round(2) if s is not none and r is not none else none }}
+
+      # Source for all delta T statistics; unknown while the circuit is idle.
+      - name: Floor Heating Delta T Running
+        unique_id: floor_heating_delta_t_running
+        state_class: measurement
+        unit_of_measurement: K
+        icon: mdi:delta
+        state: >-
+          {{ states('sensor.floor_heating_delta_t') | float(none)
+             if is_state('binary_sensor.floor_heating_active', 'on') else none }}
+
+      # --- derived statistics -----------------------------------------------
+      # Coefficient of variation: delta T spread relative to its level.
+      - name: Floor Heating Delta T CV 24h
+        unique_id: floor_heating_delta_t_cv_24h
+        state_class: measurement
+        unit_of_measurement: "%"
+        icon: mdi:chart-bell-curve
+        state: >-
+          {%- set m = states('sensor.floor_heating_delta_t_mean_24h') | float(0) -%}
+          {%- set s = states('sensor.floor_heating_delta_t_std_24h') | float(none) -%}
+          {{ (s / m * 100) | round(1) if s is not none and m > 0 else none }}
+
+      - name: Floor Heating Average Run Length
+        unique_id: floor_heating_average_run_length
+        device_class: duration
+        state_class: measurement
+        unit_of_measurement: min
+        icon: mdi:timer-sync
+        state: >-
+          {%- set ratio = states('sensor.floor_heating_duty_cycle_24h') | float(none) -%}
+          {%- set n = states('sensor.floor_heating_cycles_24h') | int(0) -%}
+          {{ (ratio / 100 * 1440 / n) | round(0) if ratio is not none and n > 0 else none }}
+
+  - binary_sensor:
+      - name: Floor Heating Active
+        unique_id: floor_heating_active
+        device_class: running
+        icon: mdi:heating-coil
+        # Seconds. Template values inside a minutes: dict are rejected by the schema.
+        delay_on: "{{ states('input_number.fh_running_delay') | int(5) * 60 }}"
+        delay_off: "00:01:00"
+        state: >-
+          {{ states('sensor.floor_heating_delta_t') | float(0)
+               >= states('input_number.fh_min_delta_t') | float(1)
+             and states('sensor.floor_heating_supply_temperature') | float(0)
+               >= states('input_number.fh_min_supply_temp') | float(25) }}
+
+      # Mirror of the running condition: return clearly warmer than supply while warm.
+      - name: Floor Heating Sensors Swapped
+        unique_id: floor_heating_sensors_swapped
+        device_class: problem
+        icon: mdi:swap-vertical
+        delay_on: "00:15:00"
+        state: >-
+          {%- set s = states('sensor.floor_heating_supply_temperature') | float(none) -%}
+          {%- set r = states('sensor.floor_heating_return_temperature') | float(none) -%}
+          {{ s is not none and r is not none
+             and r - s >= states('input_number.fh_min_delta_t') | float(1)
+             and r >= states('input_number.fh_min_supply_temp') | float(25) }}
+
+# -----------------------------------------------------------------------------
+# Rolling statistics (samples from running periods only) and runtime
+# -----------------------------------------------------------------------------
+sensor:
+  - platform: statistics
+    name: Floor Heating Delta T Mean 1h
+    unique_id: floor_heating_delta_t_mean_1h
+    entity_id: sensor.floor_heating_delta_t_running
+    state_characteristic: mean
+    max_age:
+      hours: 1
+
+  - platform: statistics
+    name: Floor Heating Delta T Std 1h
+    unique_id: floor_heating_delta_t_std_1h
+    entity_id: sensor.floor_heating_delta_t_running
+    state_characteristic: standard_deviation
+    max_age:
+      hours: 1
+
+  - platform: statistics
+    name: Floor Heating Delta T Mean 24h
+    unique_id: floor_heating_delta_t_mean_24h
+    entity_id: sensor.floor_heating_delta_t_running
+    state_characteristic: mean
+    max_age:
+      hours: 24
+
+  - platform: statistics
+    name: Floor Heating Delta T Std 24h
+    unique_id: floor_heating_delta_t_std_24h
+    entity_id: sensor.floor_heating_delta_t_running
+    state_characteristic: standard_deviation
+    max_age:
+      hours: 24
+
+  # Percentiles instead of min/max: robust against the stop transient.
+  - platform: statistics
+    name: Floor Heating Delta T P05 24h
+    unique_id: floor_heating_delta_t_p05_24h
+    entity_id: sensor.floor_heating_delta_t_running
+    state_characteristic: percentile
+    percentile: 5
+    max_age:
+      hours: 24
+
+  - platform: statistics
+    name: Floor Heating Delta T P95 24h
+    unique_id: floor_heating_delta_t_p95_24h
+    entity_id: sensor.floor_heating_delta_t_running
+    state_characteristic: percentile
+    percentile: 95
+    max_age:
+      hours: 24
+
+  - platform: history_stats
+    name: Floor Heating Duty Cycle 24h
+    unique_id: floor_heating_duty_cycle_24h
+    entity_id: binary_sensor.floor_heating_active
+    state: "on"
+    type: ratio
+    end: "{{ now() }}"
+    duration:
+      hours: 24
+
+  - platform: history_stats
+    name: Floor Heating Cycles 24h
+    unique_id: floor_heating_cycles_24h
+    entity_id: binary_sensor.floor_heating_active
+    state: "on"
+    type: count
+    end: "{{ now() }}"
+    duration:
+      hours: 24
+
+  - platform: history_stats
+    name: Floor Heating Runtime Today
+    unique_id: floor_heating_runtime_today
+    entity_id: binary_sensor.floor_heating_active
+    state: "on"
+    type: time
+    start: "{{ today_at() }}"
+    end: "{{ now() }}"
+
+# -----------------------------------------------------------------------------
+# Automations
+# -----------------------------------------------------------------------------
+automation:
+  # input_number has no persistent default: without "initial" it starts at its
+  # minimum, with "initial" every restart overwrites the user's value.
+  - id: fh_initialise_settings
+    alias: "Floor Heating Monitor: initialise settings"
+    mode: single
+    triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: automation_reloaded
+    conditions:
+      - condition: state
+        entity_id: input_boolean.fh_initialised
+        state: "off"
+    actions:
+      - action: input_number.set_value
+        target:
+          entity_id:
+            - input_number.fh_supply_offset
+            - input_number.fh_return_offset
+        data:
+          value: 0
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.fh_min_delta_t
+        data:
+          value: 1.0
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.fh_min_supply_temp
+        data:
+          value: 25
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.fh_running_delay
+        data:
+          value: 5
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.fh_max_delta_t_std
+        data:
+          value: 1.0
+      - action: input_boolean.turn_on
+        target:
+          entity_id:
+            - input_boolean.fh_alerts_enabled
+            - input_boolean.fh_initialised
+
+  # Persistent notifications are raised and cleared by the same condition, so
+  # the sidebar only shows problems that are still present.
+  - id: fh_monitor_alerts
+    alias: "Floor Heating Monitor: alerts"
+    mode: queued
+    triggers:
+      - trigger: state
+        id: offline
+        entity_id:
+          - sensor.floor_heating_supply_temperature
+          - sensor.floor_heating_return_temperature
+        to: unavailable
+        for: "00:15:00"
+      - trigger: state
+        id: online
+        entity_id:
+          - sensor.floor_heating_supply_temperature
+          - sensor.floor_heating_return_temperature
+        from: unavailable
+      - trigger: state
+        id: swapped
+        entity_id: binary_sensor.floor_heating_sensors_swapped
+        to: "on"
+      - trigger: state
+        id: swapped_cleared
+        entity_id: binary_sensor.floor_heating_sensors_swapped
+        to: "off"
+      - trigger: numeric_state
+        id: unstable
+        entity_id: sensor.floor_heating_delta_t_std_1h
+        above: input_number.fh_max_delta_t_std
+        for: "00:30:00"
+      - trigger: numeric_state
+        id: stable
+        entity_id: sensor.floor_heating_delta_t_std_1h
+        below: input_number.fh_max_delta_t_std
+    actions:
+      - choose:
+          - conditions:
+              - condition: trigger
+                id: offline
+              - condition: state
+                entity_id: input_boolean.fh_alerts_enabled
+                state: "on"
+            sequence:
+              - action: persistent_notification.create
+                data:
+                  notification_id: fh_sensor_offline
+                  title: Floor heating pipe sensor offline
+                  message: >-
+                    {{ trigger.to_state.name }} has been unavailable for 15 minutes.
+                    Check the hallway ESPHome temperature monitor.
+
+          - conditions:
+              - condition: trigger
+                id: online
+              - condition: template
+                value_template: >-
+                  {{ has_value('sensor.floor_heating_supply_temperature')
+                     and has_value('sensor.floor_heating_return_temperature') }}
+            sequence:
+              - action: persistent_notification.dismiss
+                data:
+                  notification_id: fh_sensor_offline
+
+          - conditions:
+              - condition: trigger
+                id: swapped
+              - condition: state
+                entity_id: input_boolean.fh_alerts_enabled
+                state: "on"
+            sequence:
+              - action: persistent_notification.create
+                data:
+                  notification_id: fh_sensors_swapped
+                  title: Floor heating sensors swapped?
+                  message: >-
+                    The return pipe has read
+                    {{ (states('sensor.floor_heating_return_temperature') | float(0)
+                        - states('sensor.floor_heating_supply_temperature') | float(0)) | round(1) }} K
+                    warmer than the supply for 15 minutes. Turn on
+                    "FH Swap Supply/Return Sensors" if supply and return are mixed up.
+
+          - conditions:
+              - condition: trigger
+                id: swapped_cleared
+            sequence:
+              - action: persistent_notification.dismiss
+                data:
+                  notification_id: fh_sensors_swapped
+
+          - conditions:
+              - condition: trigger
+                id: unstable
+              - condition: state
+                entity_id: input_boolean.fh_alerts_enabled
+                state: "on"
+            sequence:
+              - action: persistent_notification.create
+                data:
+                  notification_id: fh_delta_t_unstable
+                  title: Floor heating delta T unstable
+                  message: >-
+                    Delta T has varied by
+                    {{ states('sensor.floor_heating_delta_t_std_1h') }} K (std dev, last hour)
+                    around a mean of {{ states('sensor.floor_heating_delta_t_mean_1h') }} K.
+                    Typical causes: heat pump on/off cycling, defrost cycles, or room
+                    thermostats closing floor loops.
+
+          - conditions:
+              - condition: trigger
+                id: stable
+            sequence:
+              - action: persistent_notification.dismiss
+                data:
+                  notification_id: fh_delta_t_unstable

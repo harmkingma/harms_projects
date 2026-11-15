@@ -1,0 +1,400 @@
+# =============================================================================
+# Water Meter Package - consumption, leak detection and reader health
+# =============================================================================
+# Source: the "Water Meter Reader" add-on (ESP32-CAM + computer vision), which
+# publishes these entities through MQTT discovery:
+#   sensor.water_meter_total                m3, total_increasing (Energy dashboard)
+#   sensor.water_meter_flow                 L/min between consecutive readings
+#   binary_sensor.water_meter_drawing       on while a water draw is open
+#   sensor.water_meter_status               ok | ok_tracked | low_confidence | implausible
+#                                           | no_alignment | no_dials | camera_error
+#   sensor.water_meter_last_valid_reading   timestamp of the last accepted reading
+#   number.water_meter_set_meter_value      type the meter value to (re)sync
+#   camera.water_meter_last_image           annotated last snapshot
+#
+# Requires Home Assistant 2024.10+ (modern triggers/conditions/actions syntax).
+#
+# Energy dashboard: Settings -> Dashboards -> Energy -> Water consumption ->
+# add sensor.water_meter_total.
+#
+# LEAK DETECTION (all thresholds are helpers, edit them on the dashboard)
+#   Continuous flow  the total never stayed unchanged for "Idle Period" minutes
+#                    in the last 24 h (dripping tap, running toilet).
+#   Night usage      more than "Night Max." litres used in the night window.
+#   Long flow        flow above "Long Flow Min." for "Long Flow Duration" min
+#                    (tap left open, burst pipe).
+#   Reader stale     no accepted reading for "Stale After" minutes.
+# Resolution is 0.1 L; the reader samples every 30 s by default, every 10 s
+# while water runs.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Settings
+# -----------------------------------------------------------------------------
+input_boolean:
+  # Set by the defaults automation, so the settings below are initialised once
+  # and later edits survive restarts.
+  wm_initialised:
+    name: WM Initialised
+    icon: mdi:check-decagram
+
+  wm_alerts_enabled:
+    name: WM Leak Alerts Enabled
+    icon: mdi:bell-ring
+
+input_number:
+  wm_idle_minutes:
+    name: WM Idle Period (continuous-flow check)
+    min: 10
+    max: 240
+    step: 5
+    unit_of_measurement: min
+    mode: box
+    icon: mdi:timer-sand
+
+  wm_night_max_l:
+    name: WM Night Max. Usage
+    min: 0
+    max: 200
+    step: 0.5
+    unit_of_measurement: L
+    mode: box
+    icon: mdi:weather-night
+
+  wm_long_flow_lpm:
+    name: WM Long Flow Min.
+    min: 0.2
+    max: 30
+    step: 0.1
+    unit_of_measurement: L/min
+    mode: box
+    icon: mdi:water-alert
+
+  wm_long_flow_minutes:
+    name: WM Long Flow Duration
+    min: 5
+    max: 240
+    step: 5
+    unit_of_measurement: min
+    mode: box
+    icon: mdi:timer-alert
+
+  wm_stale_minutes:
+    name: WM Stale After
+    min: 5
+    max: 240
+    step: 5
+    unit_of_measurement: min
+    mode: box
+    icon: mdi:timer-off
+
+input_datetime:
+  wm_night_start:
+    name: WM Night Start
+    has_date: false
+    has_time: true
+    icon: mdi:weather-night
+
+  wm_night_end:
+    name: WM Night End
+    has_date: false
+    has_time: true
+    icon: mdi:weather-sunset-up
+
+# -----------------------------------------------------------------------------
+# Consumption
+# -----------------------------------------------------------------------------
+utility_meter:
+  water_daily:
+    name: Water Daily
+    unique_id: water_daily
+    source: sensor.water_meter_total
+    cycle: daily
+  water_weekly:
+    name: Water Weekly
+    unique_id: water_weekly
+    source: sensor.water_meter_total
+    cycle: weekly
+  water_monthly:
+    name: Water Monthly
+    unique_id: water_monthly
+    source: sensor.water_meter_total
+    cycle: monthly
+
+template:
+  - sensor:
+      - name: Water Today
+        unique_id: water_today_litres
+        unit_of_measurement: L
+        state_class: total_increasing
+        device_class: water
+        icon: mdi:water
+        availability: "{{ states('sensor.water_daily') | is_number }}"
+        state: "{{ (states('sensor.water_daily') | float(0) * 1000) | round(1) }}"
+
+      - name: Water Meter Reading Age
+        unique_id: water_meter_reading_age
+        unit_of_measurement: min
+        state_class: measurement
+        icon: mdi:clock-alert-outline
+        availability: "{{ has_value('sensor.water_meter_last_valid_reading') }}"
+        state: >-
+          {{ ((now() - as_datetime(states('sensor.water_meter_last_valid_reading'))).total_seconds() / 60)
+             | round(1) }}
+
+  # Total at the start of the night window; night usage = total now - this.
+  - triggers:
+      - trigger: time
+        at: input_datetime.wm_night_start
+    sensor:
+      - name: Water Meter Night Start Total
+        unique_id: water_meter_night_start_total
+        unit_of_measurement: m³
+        icon: mdi:weather-night
+        state: "{{ states('sensor.water_meter_total') | float(none) }}"
+
+  # Last time the total had been unchanged for the idle period (= proof of no
+  # leak at that moment). Re-evaluated every 5 min so it keeps advancing while
+  # the house is idle; restored across restarts.
+  - triggers:
+      - trigger: time_pattern
+        minutes: /5
+    sensor:
+      - name: Water Meter Last Idle
+        unique_id: water_meter_last_idle
+        device_class: timestamp
+        icon: mdi:water-off
+        state: >-
+          {%- set idle = states('input_number.wm_idle_minutes') | int(30) * 60 -%}
+          {%- if has_value('sensor.water_meter_total')
+                and (now() - states.sensor.water_meter_total.last_changed).total_seconds() >= idle -%}
+            {{ now().isoformat() }}
+          {%- else -%}
+            {{ this.state }}
+          {%- endif -%}
+
+  - binary_sensor:
+      - name: Water Continuous Flow
+        unique_id: water_continuous_flow
+        device_class: moisture
+        icon: mdi:water-alert
+        # Unknown until the meter has been idle once.
+        availability: "{{ has_value('sensor.water_meter_last_idle') }}"
+        state: >-
+          {{ now() - as_datetime(states('sensor.water_meter_last_idle')) > timedelta(hours=24) }}
+
+      - name: Water Meter Reader Stale
+        unique_id: water_meter_reader_stale
+        device_class: problem
+        icon: mdi:camera-off
+        state: >-
+          {{ not has_value('sensor.water_meter_reading_age')
+             or states('sensor.water_meter_reading_age') | float(0)
+                > states('input_number.wm_stale_minutes') | float(15) }}
+
+# -----------------------------------------------------------------------------
+# Automations
+# -----------------------------------------------------------------------------
+automation:
+  # input_number has no persistent default: without "initial" it starts at its
+  # minimum, with "initial" every restart overwrites the user's value.
+  - id: wm_initialise_settings
+    alias: "Water Meter: initialise settings"
+    mode: single
+    triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: automation_reloaded
+    conditions:
+      - condition: state
+        entity_id: input_boolean.wm_initialised
+        state: "off"
+    actions:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.wm_idle_minutes
+        data:
+          value: 30
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.wm_night_max_l
+        data:
+          value: 2
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.wm_long_flow_lpm
+        data:
+          value: 1
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.wm_long_flow_minutes
+        data:
+          value: 60
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.wm_stale_minutes
+        data:
+          value: 15
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.wm_night_start
+        data:
+          time: "01:00:00"
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.wm_night_end
+        data:
+          time: "05:00:00"
+      - action: input_boolean.turn_on
+        target:
+          entity_id:
+            - input_boolean.wm_alerts_enabled
+            - input_boolean.wm_initialised
+
+  # Persistent notifications are raised and cleared by the same condition, so
+  # the sidebar only shows problems that are still present.
+  - id: wm_leak_alerts
+    alias: "Water Meter: leak alerts"
+    mode: queued
+    triggers:
+      - trigger: state
+        id: continuous
+        entity_id: binary_sensor.water_continuous_flow
+        to: "on"
+      - trigger: state
+        id: continuous_cleared
+        entity_id: binary_sensor.water_continuous_flow
+        to: "off"
+      - trigger: numeric_state
+        id: long_flow
+        entity_id: sensor.water_meter_flow
+        above: input_number.wm_long_flow_lpm
+        for:
+          minutes: "{{ states('input_number.wm_long_flow_minutes') | int(60) }}"
+      - trigger: numeric_state
+        id: long_flow_cleared
+        entity_id: sensor.water_meter_flow
+        below: input_number.wm_long_flow_lpm
+        for: "00:05:00"
+      - trigger: time
+        id: night_end
+        at: input_datetime.wm_night_end
+    actions:
+      - choose:
+          - conditions:
+              - condition: trigger
+                id: continuous
+              - condition: state
+                entity_id: input_boolean.wm_alerts_enabled
+                state: "on"
+            sequence:
+              - action: persistent_notification.create
+                data:
+                  notification_id: wm_continuous_flow
+                  title: Possible water leak (continuous flow)
+                  message: >-
+                    The water meter has not stood still for
+                    {{ states('input_number.wm_idle_minutes') | int(30) }} minutes in the last 24 hours.
+                    Check for a dripping tap or a running toilet.
+
+          - conditions:
+              - condition: trigger
+                id: continuous_cleared
+            sequence:
+              - action: persistent_notification.dismiss
+                data:
+                  notification_id: wm_continuous_flow
+
+          - conditions:
+              - condition: trigger
+                id: long_flow
+              - condition: state
+                entity_id: input_boolean.wm_alerts_enabled
+                state: "on"
+            sequence:
+              - action: persistent_notification.create
+                data:
+                  notification_id: wm_long_flow
+                  title: Water running for a long time
+                  message: >-
+                    Water has been flowing at more than
+                    {{ states('input_number.wm_long_flow_lpm') }} L/min for
+                    {{ states('input_number.wm_long_flow_minutes') | int(60) }} minutes
+                    (now {{ states('sensor.water_meter_flow') }} L/min).
+
+          - conditions:
+              - condition: trigger
+                id: long_flow_cleared
+            sequence:
+              - action: persistent_notification.dismiss
+                data:
+                  notification_id: wm_long_flow
+
+          - conditions:
+              - condition: trigger
+                id: night_end
+              - condition: template
+                value_template: >-
+                  {{ has_value('sensor.water_meter_night_start_total')
+                     and has_value('sensor.water_meter_total') }}
+            sequence:
+              - variables:
+                  night_l: >-
+                    {{ ((states('sensor.water_meter_total') | float(0)
+                         - states('sensor.water_meter_night_start_total') | float(0)) * 1000) | round(1) }}
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{ night_l > states('input_number.wm_night_max_l') | float(2)
+                         and is_state('input_boolean.wm_alerts_enabled', 'on') }}
+                then:
+                  - action: persistent_notification.create
+                    data:
+                      notification_id: wm_night_usage
+                      title: Water used during the night
+                      message: >-
+                        {{ night_l }} L was used between
+                        {{ states('input_datetime.wm_night_start')[:5] }} and
+                        {{ states('input_datetime.wm_night_end')[:5] }}
+                        (limit {{ states('input_number.wm_night_max_l') }} L).
+                else:
+                  - action: persistent_notification.dismiss
+                    data:
+                      notification_id: wm_night_usage
+
+  - id: wm_reader_alerts
+    alias: "Water Meter: reader health"
+    mode: queued
+    triggers:
+      - trigger: state
+        id: stale
+        entity_id: binary_sensor.water_meter_reader_stale
+        to: "on"
+      - trigger: state
+        id: fresh
+        entity_id: binary_sensor.water_meter_reader_stale
+        to: "off"
+    actions:
+      - choose:
+          - conditions:
+              - condition: trigger
+                id: stale
+            sequence:
+              - action: persistent_notification.create
+                data:
+                  notification_id: wm_reader_stale
+                  title: Water meter reader not reading
+                  message: >-
+                    No valid water meter reading for
+                    {{ states('sensor.water_meter_reading_age') | float(0) | round(0) }} minutes
+                    (status: {{ states('sensor.water_meter_status') }}
+                    {{ state_attr('sensor.water_meter_status', 'detail') or '' }}).
+                    Check the ESP32-CAM and the Water Meter Reader add-on log.
+          - conditions:
+              - condition: trigger
+                id: fresh
+            sequence:
+              - action: persistent_notification.dismiss
+                data:
+                  notification_id: wm_reader_stale

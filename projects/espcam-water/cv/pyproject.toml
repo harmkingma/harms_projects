@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harms-watermeter"
+version = "0.1.0"
+description = "Water-meter computer vision and MQTT service"
+dynamic = ["dependencies"]
+
+[tool.setuptools]
+packages = ["watermeter"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
