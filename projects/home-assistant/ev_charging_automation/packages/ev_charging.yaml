@@ -6,11 +6,17 @@
 # Entity IDs assumed (adjust here if yours differ):
 #   switch.life_the_universe_and_everything_charge
 #   sensor.life_the_universe_and_everything_battery_level
+#   sensor.life_the_universe_and_everything_odometer          (disabled by default)
+#   sensor.life_the_universe_and_everything_charge_energy_added
 #   number.life_the_universe_and_everything_charge_limit
+#   number.life_the_universe_and_everything_charge_current    (car's amps setting)
 #   button.life_the_universe_and_everything_wake
 #   select.ev_charger_solar_charging_mode          (Comfort / Disable / Green)
 #   sensor.ev_charger_status_code_socket_1_2       (Alfen socket status)
+#   sensor.ev_charger_current_l1_socket_1 .. l3    (Alfen phase currents)
+#   number.ev_charger_max_station_current          (Alfen maximum, 16 A)
 #   sensor.p1_meter_power                          (negative = export/surplus)
+#   sensor.p1_meter_power_phase_1 .. 3             (per-phase grid power in W)
 #   sensor.steca_inverter_ac_power                  (solar production in W)
 #
 # NOTE ON THE SLEEPING CAR
@@ -58,6 +64,23 @@ input_boolean:
   ev_trip_planned:
     name: EV Trip Planned
     icon: mdi:map-marker-path
+
+  # While a planned session waits, keep the charger in Green (solar only, 0 A at
+  # night) so the car cannot start by itself on plug-in and need stopping.
+  ev_hold_green_while_waiting:
+    name: EV Hold With Green While Waiting
+    icon: mdi:car-clock
+
+  # Set by the settings initialiser, so the defaults below are written once and
+  # later edits survive restarts.
+  ev_settings_initialised:
+    name: EV Charging Settings Initialised
+    icon: mdi:check-decagram
+
+counter:
+  ev_watchdog_corrections:
+    name: EV Watchdog Corrections
+    icon: mdi:shield-sync
 
 input_datetime:
   work_departure_time:
@@ -123,6 +146,12 @@ input_datetime:
     has_date: true
     has_time: true
     icon: mdi:calendar-alert
+
+  ev_watchdog_last_action:
+    name: EV Watchdog Last Correction
+    has_date: true
+    has_time: true
+    icon: mdi:shield-sync
 
 input_number:
   ev_roundtrip_consumption:
@@ -262,6 +291,54 @@ input_number:
     mode: box
     icon: mdi:battery-clock
 
+  ev_main_fuse_current:
+    name: EV Main Fuse Current
+    min: 10
+    max: 80
+    step: 1
+    unit_of_measurement: "A"
+    mode: box
+    icon: mdi:fuse
+
+  # Escalation step of the current watchdog in the running session:
+  # 0 nudge the car's amps, 1 pause and resume, 2 report only, 3 done.
+  ev_watchdog_level:
+    name: EV Watchdog Escalation Level
+    min: 0
+    max: 3
+    step: 1
+    mode: box
+    icon: mdi:stairs-up
+
+  ev_roundtrip_distance_km:
+    name: EV Roundtrip Distance
+    min: 5
+    max: 500
+    step: 1
+    unit_of_measurement: "km"
+    mode: box
+    icon: mdi:map-marker-distance
+
+  ev_consumption_margin:
+    name: EV Consumption Margin
+    min: 0
+    max: 50
+    step: 1
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:plus-minus-variant
+
+  # Distance the learned consumption averages over. Shorter follows the season
+  # faster; longer smooths the 1% SOC rounding of individual drives.
+  ev_consumption_window_km:
+    name: EV Consumption Learning Window
+    min: 100
+    max: 3000
+    step: 50
+    unit_of_measurement: "km"
+    mode: box
+    icon: mdi:chart-bell-curve
+
 # -----------------------------------------------------------------------------
 # Smoothed grid power
 # -----------------------------------------------------------------------------
@@ -333,6 +410,101 @@ template:
         attributes:
           samples: "{{ solar_samples }}"
           averaging_minutes: "{{ states('input_number.ev_solar_stop_average_minutes') | int(20) }}"
+
+  # Learns the driving consumption from the odometer and the SOC. Tesla Fleet
+  # writes odometer and SOC as separate state changes of one poll, so a state
+  # trigger would see only half a poll. A 5-minute tick that waits until both
+  # have been stable for a minute always reads one consistent poll. Movement
+  # since the anchor is a driving segment; SOC changes without movement (parked
+  # drain, home charging) only move the anchor. A segment in which SOC rose or
+  # energy was added (charging away from home) is skipped.
+  # The state is the window distance, always a number, so the attributes are
+  # restored after a restart. Do not rename sensor.ev_consumption_history: the
+  # template reads its own previous attributes from this entity ID.
+  - triggers:
+      - trigger: time_pattern
+        id: tick
+        minutes: "/5"
+      - trigger: event
+        id: command
+        event_type: ev_consumption_command
+    actions:
+      - variables:
+          learn: >-
+            {%- set odo_id = 'sensor.life_the_universe_and_everything_odometer' -%}
+            {%- set soc_id = 'sensor.life_the_universe_and_everything_battery_level' -%}
+            {%- set kwh_id = 'sensor.life_the_universe_and_everything_charge_energy_added' -%}
+            {%- set hist_id = 'sensor.ev_consumption_history' -%}
+            {%- set now_ts = now().timestamp() | int -%}
+            {%- set window = states('input_number.ev_consumption_window_km') | float(500) -%}
+            {%- set prev = state_attr(hist_id, 'segments') -%}
+            {%- set anchor = state_attr(hist_id, 'anchor') -%}
+            {%- set ns = namespace(seg=prev if prev is list else [], anchor=anchor if anchor is mapping else none,
+                  note=state_attr(hist_id, 'last_event') or '', keep=[], km=0) -%}
+            {%- set odo = states(odo_id) | float(none) -%}
+            {%- if odo is not none and state_attr(odo_id, 'unit_of_measurement') == 'mi' -%}
+              {%- set odo = odo * 1.609344 -%}
+            {%- endif -%}
+            {%- set soc = states(soc_id) | float(none) -%}
+            {%- set kwh = states(kwh_id) | float(none) -%}
+            {%- set cmd = (trigger.event.data.command | default('')) if trigger.id == 'command' else '' -%}
+            {%- if cmd == 'clear' -%}
+              {%- set ns.seg = [] -%}
+              {%- set ns.anchor = none -%}
+              {%- set ns.note = 'cleared' -%}
+            {%- elif cmd == 'seed' -%}
+              {%- set km = trigger.event.data.km | float(0) -%}
+              {%- set used = trigger.event.data.soc | float(0) -%}
+              {%- if km > 0 and used >= 0 -%}
+                {%- set ns.seg = ns.seg + [[now_ts, km | round(2), used | round(1)]] -%}
+                {%- set ns.note = 'seeded ' ~ km | round(0) | int ~ ' km' -%}
+              {%- endif -%}
+            {%- elif trigger.id == 'tick' and odo is not none and soc is not none -%}
+              {%- set changed = [states[odo_id].last_changed, states[soc_id].last_changed] | max -%}
+              {%- if now_ts - changed.timestamp() >= 60 -%}
+                {%- set here = {'ts': now_ts, 'odo': odo | round(2), 'soc': soc,
+                                'kwh': kwh if kwh is not none else (ns.anchor.kwh if ns.anchor else none)} -%}
+                {%- if ns.anchor is none -%}
+                  {%- set ns.anchor = here -%}
+                {%- else -%}
+                  {%- set dk = odo - ns.anchor.odo -%}
+                  {%- set ds = ns.anchor.soc - soc -%}
+                  {%- set de = (kwh - ns.anchor.kwh) if kwh is not none and ns.anchor.kwh is number else 0 -%}
+                  {%- if dk >= 0.1 -%}
+                    {#- Any counter change means a charge: it resets to 0 on every new session. -#}
+                    {%- if ds < 0 or (de | abs) > 0.05 -%}
+                      {%- set ns.note = 'skipped ' ~ dk | round(1) ~ ' km: charged on the way' -%}
+                    {%- else -%}
+                      {%- set ns.seg = ns.seg + [[now_ts, dk | round(2), ds]] -%}
+                      {%- set ns.note = dk | round(1) ~ ' km, ' ~ ds | round(0) | int ~ ' %' -%}
+                    {%- endif -%}
+                    {%- set ns.anchor = here -%}
+                  {%- elif dk <= -0.1 or soc != ns.anchor.soc or here.kwh != ns.anchor.kwh -%}
+                    {%- set ns.anchor = here -%}
+                  {%- endif -%}
+                {%- endif -%}
+              {%- endif -%}
+            {%- endif -%}
+            {#- Keep the newest segments that together just cover the window. -#}
+            {%- for s in ns.seg | reverse -%}
+              {%- if ns.km < window and ns.keep | count < 400 -%}
+                {%- set ns.keep = [s] + ns.keep -%}
+                {%- set ns.km = ns.km + s[1] -%}
+              {%- endif -%}
+            {%- endfor -%}
+            {{- {'segments': ns.keep, 'anchor': ns.anchor, 'note': ns.note,
+                 'km': ns.km | round(1), 'soc': (ns.keep | map(attribute=2) | sum) | round(1)} -}}
+    sensor:
+      - name: EV Consumption History
+        unique_id: ev_consumption_history
+        icon: mdi:map-marker-distance
+        unit_of_measurement: "km"
+        state: "{{ learn.km }}"
+        attributes:
+          soc_used: "{{ learn.soc }}"
+          segments: "{{ learn.segments }}"
+          anchor: "{{ learn.anchor }}"
+          last_event: "{{ learn.note }}"
 
   - sensor:
       - name: EV Next Departure
@@ -439,7 +611,7 @@ template:
         state: >
           {% set run = states('sensor.ev_workday_run_length') | int(0) %}
           {% set minsoc = states('input_number.ev_min_remaining_soc') | float(25) %}
-          {% set cons = states('input_number.ev_roundtrip_consumption') | float(26) %}
+          {% set cons = states('sensor.ev_roundtrip_consumption_effective') | float(states('input_number.ev_roundtrip_consumption') | float(26)) %}
           {% set limit = states('input_number.ev_regular_charge_limit') | float(80) %}
           {% if is_state('binary_sensor.ev_conditioning_due', 'on') %}
             100
@@ -454,7 +626,7 @@ template:
           uncapped: >
             {% set run = states('sensor.ev_workday_run_length') | int(0) %}
             {% set minsoc = states('input_number.ev_min_remaining_soc') | float(25) %}
-            {% set cons = states('input_number.ev_roundtrip_consumption') | float(26) %}
+            {% set cons = states('sensor.ev_roundtrip_consumption_effective') | float(states('input_number.ev_roundtrip_consumption') | float(26)) %}
             {{ (minsoc + run * cons) | round(0) }}
           reason: >
             {% if is_state('binary_sensor.ev_conditioning_due', 'on') %}
@@ -533,6 +705,111 @@ template:
           {% set margin = states('input_number.ev_ready_margin_hours') | float(1) %}
           {{ (dep - timedelta(hours=margin + deficit / rate)).isoformat() }}
 
+      # Learned driving consumption over the window, in SOC points per 100 km.
+      - name: EV Consumption Rate
+        unique_id: ev_consumption_rate
+        icon: mdi:speedometer-medium
+        unit_of_measurement: "%/100 km"
+        availability: >
+          {{ states('sensor.ev_consumption_history') | float(0) >= 100 }}
+        state: >
+          {% set km = states('sensor.ev_consumption_history') | float(0) %}
+          {% set used = state_attr('sensor.ev_consumption_history', 'soc_used') | float(0) %}
+          {{ (used / km * 100) | round(2) }}
+        attributes:
+          # Usable capacity from the battery health package when it has one.
+          kwh_per_100km: >
+            {% set km = states('sensor.ev_consumption_history') | float(0) %}
+            {% set used = state_attr('sensor.ev_consumption_history', 'soc_used') | float(0) %}
+            {% set cap = states('sensor.ev_battery_usable_capacity')
+                 | float(states('input_number.ev_bh_reference_capacity') | float(60)) %}
+            {{ (used / km * cap) | round(1) if km > 0 else none }}
+
+      # What the workday planning uses: learned when there is enough data,
+      # otherwise the manual Roundtrip Consumption.
+      - name: EV Roundtrip Consumption Effective
+        unique_id: ev_roundtrip_consumption_effective
+        icon: mdi:road-variant
+        unit_of_measurement: "%"
+        state: >
+          {% set rate = states('sensor.ev_consumption_rate') %}
+          {% if rate | is_number %}
+            {% set km = states('input_number.ev_roundtrip_distance_km') | float(0) %}
+            {% set margin = states('input_number.ev_consumption_margin') | float(0) %}
+            {{ (rate | float / 100 * km * (1 + margin / 100)) | round(1) }}
+          {% else %}
+            {{ states('input_number.ev_roundtrip_consumption') | float(26) }}
+          {% endif %}
+        attributes:
+          source: "{{ 'learned' if states('sensor.ev_consumption_rate') | is_number else 'manual' }}"
+
+      # Highest Alfen phase current: what the car really draws, polled locally.
+      - name: EV Charging Current
+        unique_id: ev_charging_current
+        device_class: current
+        unit_of_measurement: "A"
+        state: >
+          {{ [states('sensor.ev_charger_current_l1_socket_1') | float(0),
+              states('sensor.ev_charger_current_l2_socket_1') | float(0),
+              states('sensor.ev_charger_current_l3_socket_1') | float(0)] | max | round(1) }}
+
+      # Current the car could draw on its tightest phase without exceeding the
+      # main fuse. The P1 reading includes the car's own load, so that is added back.
+      - name: EV Current Headroom
+        unique_id: ev_current_headroom
+        device_class: current
+        unit_of_measurement: "A"
+        availability: >
+          {{ states('sensor.p1_meter_power_phase_1') | is_number
+             and states('sensor.p1_meter_power_phase_2') | is_number
+             and states('sensor.p1_meter_power_phase_3') | is_number }}
+        state: >
+          {% set fuse = states('input_number.ev_main_fuse_current') | float(25) %}
+          {% set ns = namespace(room=[]) %}
+          {% for i in [1, 2, 3] %}
+            {% set grid = states('sensor.p1_meter_power_phase_' ~ i) | float(0) / 230 %}
+            {% set ev = states('sensor.ev_charger_current_l' ~ i ~ '_socket_1') | float(0) %}
+            {% set ns.room = ns.room + [fuse - grid + ev] %}
+          {% endfor %}
+          {{ ns.room | min | round(1) }}
+
+      # Amps the car should ask for: the charger maximum, capped by what the
+      # car reports the charger currently offers. Tesla rejects more than that.
+      - name: EV Charge Current Target
+        unique_id: ev_charge_current_target
+        device_class: current
+        unit_of_measurement: "A"
+        state: >
+          {% set station = states('number.ev_charger_max_station_current') | float(16) %}
+          {% set offered = state_attr('number.life_the_universe_and_everything_charge_current', 'max') | float(station) %}
+          {{ [station, offered] | min | int }}
+
+      # Charger mode to hold while no session runs, so the car's own start on
+      # plug-in already happens in the right mode:
+      #   Disable  a max-power start is due (safety floor or night start time)
+      #   Green    a night session is pending outside the solar window; Green
+      #            offers 0 A without sun, so the car cannot start by itself
+      #   Comfort  otherwise, so charging from the Tesla app keeps working
+      - name: EV Idle Charger Mode
+        unique_id: ev_idle_charger_mode
+        icon: mdi:ev-plug-type2
+        state: >
+          {% set soc = states('sensor.ev_soc_effective') | float(100) %}
+          {% set st = states('sensor.ev_night_charge_start') %}
+          {% set dep = states('sensor.ev_next_departure') %}
+          {% set night_due = st not in ['unknown', 'unavailable', 'none', '']
+               and dep not in ['unknown', 'unavailable', 'none', '']
+               and now() >= (st | as_datetime) and now() < (dep | as_datetime) %}
+          {% if soc < states('input_number.ev_min_safe_soc') | float(0) or night_due %}
+            Disable
+          {% elif is_state('input_boolean.ev_hold_green_while_waiting', 'on')
+                  and is_state('binary_sensor.ev_night_session_pending', 'on')
+                  and is_state('binary_sensor.ev_solar_window_active', 'off') %}
+            Green
+          {% else %}
+            Comfort
+          {% endif %}
+
   - binary_sensor:
       # For a time-only input_datetime the timestamp attribute is seconds since
       # midnight, which compares directly against the current time of day.
@@ -601,6 +878,28 @@ template:
           {{ st not in ['unknown', 'unavailable', 'none', '']
              and now() < (st | as_datetime) }}
 
+      # A max-power session draws clearly less than the charger maximum for 15
+      # minutes, and neither load balancing, the main fuse nor the end-of-charge
+      # taper near the limit explains it.
+      - name: EV Current Shortfall
+        unique_id: ev_current_shortfall
+        icon: mdi:current-ac
+        delay_on:
+          minutes: 15
+        state: >
+          {% set station = states('number.ev_charger_max_station_current') | float(16) %}
+          {{ is_state('binary_sensor.ev_charging_active', 'on')
+             and (is_state('input_boolean.ev_night_session', 'on')
+                  or is_state('input_boolean.ev_safety_session', 'on')
+                  or is_state('input_boolean.ev_max_power_override', 'on'))
+             and is_state('select.ev_charger_solar_charging_mode', 'Disable')
+             and states('sensor.ev_charger_status_code_socket_1_2')
+                 not in ['Load Balancing Limited', 'Load Balancing Forced Off']
+             and states('sensor.ev_current_headroom') | float(0) >= station
+             and states('sensor.ev_charging_current') | float(station) < station - 3
+             and states('sensor.ev_soc_effective') | float(100)
+                 < states('number.life_the_universe_and_everything_charge_limit') | float(0) - 3 }}
+
 # -----------------------------------------------------------------------------
 # Scripts (dashboard buttons)
 # -----------------------------------------------------------------------------
@@ -610,23 +909,6 @@ script:
     icon: mdi:flash
     mode: single
     sequence:
-      - if:
-          - condition: not
-            conditions:
-              - condition: state
-                entity_id: select.ev_charger_solar_charging_mode
-                state: "Disable"
-        then:
-          - action: select.select_option
-            target:
-              entity_id: select.ev_charger_solar_charging_mode
-            data:
-              option: "Disable"
-      - action: number.set_value
-        target:
-          entity_id: number.life_the_universe_and_everything_charge_limit
-        data:
-          value: "{{ states('sensor.ev_daytime_charge_ceiling') | int(80) }}"
       - action: input_boolean.turn_on
         target:
           entity_id: input_boolean.ev_max_power_override
@@ -636,6 +918,9 @@ script:
         data:
           datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
       - action: script.ev_begin_charging
+        data:
+          mode: "Disable"
+          limit: "{{ states('sensor.ev_daytime_charge_ceiling') | int(80) }}"
 
   ev_stop_charging:
     alias: "EV: Stop Charging"
@@ -663,21 +948,54 @@ script:
     icon: mdi:white-balance-sunny
     mode: single
     sequence:
-      - if:
-          - condition: not
-            conditions:
-              - condition: state
-                entity_id: select.ev_charger_solar_charging_mode
-                state: "Comfort"
-        then:
-          - action: select.select_option
-            target:
-              entity_id: select.ev_charger_solar_charging_mode
-            data:
-              option: "Comfort"
+      - action: script.ev_set_charger_mode
+        data:
+          mode: "Comfort"
       - action: input_boolean.turn_off
         target:
           entity_id: input_boolean.ev_max_power_override
+
+  # The select reports the Alfen's polled state, so waiting for it confirms the
+  # charger really switched. Callers check the state afterwards.
+  ev_set_charger_mode:
+    alias: "EV: Set Charger Mode"
+    icon: mdi:ev-plug-type2
+    mode: queued
+    max: 5
+    fields:
+      mode:
+        description: "Disable, Comfort or Green"
+        example: "Disable"
+    sequence:
+      - if:
+          - condition: template
+            value_template: "{{ not is_state('select.ev_charger_solar_charging_mode', mode) }}"
+        then:
+          - repeat:
+              sequence:
+                - action: select.select_option
+                  target:
+                    entity_id: select.ev_charger_solar_charging_mode
+                  data:
+                    option: "{{ mode }}"
+                - wait_template: "{{ is_state('select.ev_charger_solar_charging_mode', mode) }}"
+                  timeout:
+                    seconds: 30
+              until:
+                - condition: template
+                  value_template: >
+                    {{ is_state('select.ev_charger_solar_charging_mode', mode) or repeat.index >= 3 }}
+          - if:
+              - condition: template
+                value_template: "{{ not is_state('select.ev_charger_solar_charging_mode', mode) }}"
+            then:
+              - action: persistent_notification.create
+                data:
+                  notification_id: ev_charger_mode
+                  title: "EV charger mode not confirmed"
+                  message: >
+                    {{ now().strftime('%a %H:%M') }}: the Alfen did not switch to {{ mode }}
+                    (still {{ states('select.ev_charger_solar_charging_mode') }}).
 
   # Manual only - nothing calls this automatically. Useful to force a fresh
   # reading before a trip, or to verify the wake chain works on your setup.
@@ -710,28 +1028,134 @@ script:
                     {{ states('sensor.life_the_universe_and_everything_battery_level') | is_number
                        or repeat.index >= 8 }}
 
-  # Tesla drops commands sent to a sleeping vehicle - the wake happens but the
-  # command itself is lost, so the first attempt silently does nothing. Bring
-  # the car online first, then verify the command actually took.
+  # One start sequence for every session, in an order that avoids a stop/start:
+  #   1. charger mode, confirmed; nothing starts in the wrong mode
+  #   2. car online (commands sent to a sleeping car are dropped)
+  #   3. car's amps setting raised to what the charger offers. Tesla keeps a
+  #      lowered setting per location, and HA rejects values above the 'max'
+  #      the car reports, which follows the charger, hence after step 1
+  #   4. charge limit, last: raising it lets the car start by itself
+  #   5. charge switch on and verified, unless the car is already charging
   ev_begin_charging:
     alias: "EV: Begin Charging"
     icon: mdi:play-circle
     mode: queued
     max: 3
+    fields:
+      mode:
+        description: "Charger mode for this session: Disable or Comfort"
+        example: "Disable"
+      limit:
+        description: "Car charge limit in %; omit to leave it unchanged"
+        example: 80
     sequence:
+      - variables:
+          mode_changed: "{{ not is_state('select.ev_charger_solar_charging_mode', mode) }}"
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.ev_watchdog_level
+        data:
+          value: 0
+      - action: script.ev_set_charger_mode
+        data:
+          mode: "{{ mode }}"
+      - if:
+          - condition: template
+            value_template: "{{ not is_state('select.ev_charger_solar_charging_mode', mode) }}"
+        then:
+          # Clearing the flags lets the owning automation retry on its next tick.
+          - action: input_boolean.turn_off
+            target:
+              entity_id:
+                - input_boolean.ev_max_power_override
+                - input_boolean.ev_solar_session
+                - input_boolean.ev_night_session
+                - input_boolean.ev_safety_session
+          - stop: "Charger mode not confirmed"
       - action: script.ev_refresh_car_data
-      - repeat:
-          sequence:
-            - action: switch.turn_on
-              target:
-                entity_id: switch.life_the_universe_and_everything_charge
-            - delay:
-                seconds: 30
-          until:
-            - condition: template
-              value_template: >
-                {{ is_state('switch.life_the_universe_and_everything_charge', 'on')
-                   or repeat.index >= 3 }}
+      # Give the car a moment to see the new pilot signal before reading it.
+      - if:
+          - condition: template
+            value_template: "{{ mode_changed }}"
+        then:
+          - delay:
+              seconds: 15
+      - action: homeassistant.update_entity
+        target:
+          entity_id: number.life_the_universe_and_everything_charge_current
+        continue_on_error: true
+      - variables:
+          amps: "{{ states('number.life_the_universe_and_everything_charge_current') | float(-1) }}"
+          amps_target: >
+            {% set station = states('number.ev_charger_max_station_current') | float(16) %}
+            {% set offered = state_attr('number.life_the_universe_and_everything_charge_current', 'max') | float(station) %}
+            {{ [station, offered] | min | int }}
+      - if:
+          - condition: template
+            value_template: "{{ amps >= 0 and amps < amps_target }}"
+        then:
+          - action: number.set_value
+            target:
+              entity_id: number.life_the_universe_and_everything_charge_current
+            data:
+              value: "{{ amps_target }}"
+            continue_on_error: true
+      - if:
+          - condition: template
+            value_template: "{{ limit is defined and limit | is_number }}"
+        then:
+          - action: number.set_value
+            target:
+              entity_id: number.life_the_universe_and_everything_charge_limit
+            data:
+              value: "{{ limit | int }}"
+      - if:
+          - condition: template
+            value_template: >
+              {{ not is_state('switch.life_the_universe_and_everything_charge', 'on')
+                 and is_state('binary_sensor.ev_charging_active', 'off') }}
+        then:
+          - repeat:
+              sequence:
+                - action: switch.turn_on
+                  target:
+                    entity_id: switch.life_the_universe_and_everything_charge
+                - wait_template: "{{ is_state('switch.life_the_universe_and_everything_charge', 'on') }}"
+                  timeout:
+                    seconds: 30
+              until:
+                - condition: template
+                  value_template: >
+                    {{ is_state('switch.life_the_universe_and_everything_charge', 'on')
+                       or repeat.index >= 3 }}
+
+  ev_watchdog_report:
+    alias: "EV: Report Watchdog Correction"
+    icon: mdi:shield-sync
+    mode: queued
+    max: 5
+    fields:
+      message:
+        description: "What the watchdog found and did"
+    sequence:
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.ev_watchdog_last_action
+        data:
+          datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
+      - action: counter.increment
+        target:
+          entity_id: counter.ev_watchdog_corrections
+      - action: logbook.log
+        data:
+          name: "EV watchdog"
+          entity_id: counter.ev_watchdog_corrections
+          message: "{{ message }}"
+      - action: persistent_notification.create
+        data:
+          notification_id: ev_charge_watchdog
+          title: "EV charge watchdog"
+          message: "{{ now().strftime('%a %d %b %H:%M') }}: {{ message }}"
 
 # -----------------------------------------------------------------------------
 # Automations
@@ -774,7 +1198,9 @@ automation:
              and is_state('binary_sensor.ev_charging_active', 'off') }}
       - condition: state
         entity_id: select.ev_charger_solar_charging_mode
-        state: "Comfort"
+        state:
+          - "Comfort"
+          - "Green"
       - condition: state
         entity_id: input_boolean.ev_max_power_override
         state: "off"
@@ -799,6 +1225,8 @@ automation:
         data:
           datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
       - action: script.ev_begin_charging
+        data:
+          mode: "Comfort"
 
   - id: ev_solar_stop
     alias: "EV Solar: stop charging on grid import"
@@ -908,23 +1336,6 @@ automation:
         data:
           datetime: >
             {{ (states('sensor.ev_next_departure') | as_datetime | as_local).strftime('%Y-%m-%d %H:%M:%S') }}
-      - action: number.set_value
-        target:
-          entity_id: number.life_the_universe_and_everything_charge_limit
-        data:
-          value: "{{ target }}"
-      - if:
-          - condition: not
-            conditions:
-              - condition: state
-                entity_id: select.ev_charger_solar_charging_mode
-                state: "Disable"
-        then:
-          - action: select.select_option
-            target:
-              entity_id: select.ev_charger_solar_charging_mode
-            data:
-              option: "Disable"
       - action: input_boolean.turn_off
         target:
           entity_id: input_boolean.ev_solar_session
@@ -937,6 +1348,9 @@ automation:
         data:
           datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
       - action: script.ev_begin_charging
+        data:
+          mode: "Disable"
+          limit: "{{ target }}"
 
   - id: ev_night_end
     alias: "EV Night: end timed charge and restore Comfort"
@@ -1020,23 +1434,6 @@ automation:
             {% set ceiling = states('sensor.ev_daytime_charge_ceiling') | float(80) %}
             {% set floor = state_attr('number.life_the_universe_and_everything_charge_limit', 'min') | float(50) %}
             {{ [ceiling, floor] | max | round(0) | int }}
-      - action: number.set_value
-        target:
-          entity_id: number.life_the_universe_and_everything_charge_limit
-        data:
-          value: "{{ target }}"
-      - if:
-          - condition: not
-            conditions:
-              - condition: state
-                entity_id: select.ev_charger_solar_charging_mode
-                state: "Disable"
-        then:
-          - action: select.select_option
-            target:
-              entity_id: select.ev_charger_solar_charging_mode
-            data:
-              option: "Disable"
       - action: input_boolean.turn_off
         target:
           entity_id: input_boolean.ev_solar_session
@@ -1049,6 +1446,9 @@ automation:
         data:
           datetime: "{{ now().strftime('%Y-%m-%d %H:%M:%S') }}"
       - action: script.ev_begin_charging
+        data:
+          mode: "Disable"
+          limit: "{{ target }}"
 
   - id: ev_safety_charge_end
     alias: "EV Safety: end safe-floor charge"
@@ -1251,6 +1651,13 @@ automation:
       - condition: state
         entity_id: input_boolean.ev_max_power_override
         state: "off"
+      # A max-power start is due and the charger is already held in Disable:
+      # the safety or night start adopts this charge within 5 minutes.
+      - condition: not
+        conditions:
+          - condition: state
+            entity_id: sensor.ev_idle_charger_mode
+            state: "Disable"
       - condition: or
         conditions:
           - condition: state
@@ -1354,3 +1761,275 @@ automation:
       - action: input_boolean.turn_off
         target:
           entity_id: input_boolean.ev_max_power_override
+
+  # ---------------------------------------------------------------------------
+  # CHARGER MODE WHILE IDLE
+  # ---------------------------------------------------------------------------
+  # The car starts by itself on plug-in in whatever mode the charger is in.
+  # Holding the mode the next session needs avoids starting in the wrong mode
+  # and then stopping. Never acts while current flows or a session is owned.
+  - id: ev_idle_mode_sync
+    alias: "EV: hold charger mode while idle"
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: state
+        entity_id: sensor.ev_idle_charger_mode
+      - trigger: state
+        entity_id: binary_sensor.ev_charging_active
+        to: "off"
+        for:
+          minutes: 2
+      - trigger: time_pattern
+        minutes: "/5"
+    conditions:
+      - condition: state
+        entity_id: binary_sensor.ev_charging_active
+        state: "off"
+      - condition: not
+        conditions:
+          - condition: state
+            entity_id: switch.life_the_universe_and_everything_charge
+            state: "on"
+      - condition: state
+        entity_id:
+          - input_boolean.ev_solar_session
+          - input_boolean.ev_night_session
+          - input_boolean.ev_safety_session
+          - input_boolean.ev_max_power_override
+        state: "off"
+      - condition: template
+        value_template: >
+          {{ states('sensor.ev_idle_charger_mode') in ['Disable', 'Comfort', 'Green']
+             and not is_state('select.ev_charger_solar_charging_mode', states('sensor.ev_idle_charger_mode')) }}
+    actions:
+      - action: script.ev_set_charger_mode
+        data:
+          mode: "{{ states('sensor.ev_idle_charger_mode') }}"
+
+  # ---------------------------------------------------------------------------
+  # CHARGE CURRENT WATCHDOG
+  # ---------------------------------------------------------------------------
+  # Tesla keeps a lowered amps setting per location, so a session can run at
+  # 6 A on a free 16 A charger (seen 18 Nov 2026). Load balancing itself works
+  # through the charger's pilot signal, so the car's own setting should always
+  # be the charger maximum and the charger does the limiting. Steps, at most
+  # one per 10 minutes, the first that applies:
+  #   1. max-power session with the charger not in Disable: restore Disable
+  #   2. car asks less than the charger offers: raise the amps setting
+  #   3. unexplained shortfall for 15 min: nudge the amps, then pause and
+  #      resume once, then only report
+  - id: ev_charge_watchdog
+    alias: "EV Watchdog: keep charge current at maximum"
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: time_pattern
+        minutes: "/5"
+      - trigger: state
+        entity_id: binary_sensor.ev_current_shortfall
+        to: "on"
+    conditions:
+      - condition: state
+        entity_id: binary_sensor.ev_charging_active
+        state: "on"
+      - condition: state
+        entity_id:
+          - input_boolean.ev_solar_session
+          - input_boolean.ev_night_session
+          - input_boolean.ev_safety_session
+          - input_boolean.ev_max_power_override
+        match: any
+        state: "on"
+      - condition: template
+        value_template: >
+          {% set ts = state_attr('input_datetime.ev_watchdog_last_action', 'timestamp') | float(0) %}
+          {{ now().timestamp() - ts >= 600 }}
+    actions:
+      # The shortfall steps act on the car's amps, so read them fresh rather
+      # than from the last poll (one Fleet data request per escalation step).
+      - if:
+          - condition: state
+            entity_id: binary_sensor.ev_current_shortfall
+            state: "on"
+        then:
+          - action: homeassistant.update_entity
+            target:
+              entity_id: number.life_the_universe_and_everything_charge_current
+            continue_on_error: true
+      - variables:
+          max_power: >
+            {{ is_state('input_boolean.ev_night_session', 'on')
+               or is_state('input_boolean.ev_safety_session', 'on')
+               or is_state('input_boolean.ev_max_power_override', 'on') }}
+          charger_mode: "{{ states('select.ev_charger_solar_charging_mode') }}"
+          amps: "{{ states('number.life_the_universe_and_everything_charge_current') | float(-1) }}"
+          amps_target: >
+            {% set station = states('number.ev_charger_max_station_current') | float(16) %}
+            {% set offered = state_attr('number.life_the_universe_and_everything_charge_current', 'max') | float(station) %}
+            {{ [station, offered] | min | int }}
+          level: "{{ states('input_number.ev_watchdog_level') | int(0) }}"
+          current: "{{ states('sensor.ev_charging_current') }}"
+      - choose:
+          - conditions:
+              - condition: template
+                value_template: "{{ max_power and charger_mode != 'Disable' }}"
+            sequence:
+              - action: script.ev_set_charger_mode
+                data:
+                  mode: "Disable"
+              - action: script.ev_watchdog_report
+                data:
+                  message: >
+                    Max-power session found the charger in {{ charger_mode }} at {{ current }} A;
+                    switched it back to Disable.
+          - conditions:
+              - condition: template
+                value_template: "{{ amps >= 0 and amps < amps_target }}"
+              - condition: not
+                conditions:
+                  - condition: state
+                    entity_id: sensor.ev_charger_status_code_socket_1_2
+                    state:
+                      - "Load Balancing Limited"
+                      - "Load Balancing Forced Off"
+            sequence:
+              - action: number.set_value
+                target:
+                  entity_id: number.life_the_universe_and_everything_charge_current
+                data:
+                  value: "{{ amps_target }}"
+              - action: script.ev_watchdog_report
+                data:
+                  message: >
+                    Car asked {{ amps | int }} A while the charger offered {{ amps_target }} A
+                    (drawing {{ current }} A); raised the car's amps to {{ amps_target }} A.
+          - conditions:
+              - condition: state
+                entity_id: binary_sensor.ev_current_shortfall
+                state: "on"
+              - condition: template
+                value_template: "{{ level == 0 }}"
+            sequence:
+              - action: input_number.set_value
+                target:
+                  entity_id: input_number.ev_watchdog_level
+                data:
+                  value: 1
+              - action: number.set_value
+                target:
+                  entity_id: number.life_the_universe_and_everything_charge_current
+                data:
+                  value: "{{ [amps_target - 1, 1] | max }}"
+              - delay:
+                  seconds: 20
+              - action: number.set_value
+                target:
+                  entity_id: number.life_the_universe_and_everything_charge_current
+                data:
+                  value: "{{ amps_target }}"
+              - action: script.ev_watchdog_report
+                data:
+                  message: >
+                    Drawing only {{ current }} A for 15 min without load balancing or a full fuse;
+                    re-sent the car's amps ({{ amps_target }} A).
+          - conditions:
+              - condition: state
+                entity_id: binary_sensor.ev_current_shortfall
+                state: "on"
+              - condition: template
+                value_template: "{{ level == 1 }}"
+            sequence:
+              - action: input_number.set_value
+                target:
+                  entity_id: input_number.ev_watchdog_level
+                data:
+                  value: 2
+              - action: switch.turn_off
+                target:
+                  entity_id: switch.life_the_universe_and_everything_charge
+              - delay:
+                  seconds: 60
+              # The session may have ended, been stopped or unplugged meanwhile.
+              - if:
+                  - condition: state
+                    entity_id:
+                      - input_boolean.ev_night_session
+                      - input_boolean.ev_safety_session
+                      - input_boolean.ev_max_power_override
+                    match: any
+                    state: "on"
+                  - condition: state
+                    entity_id: binary_sensor.ev_car_plugged_in
+                    state: "on"
+                then:
+                  - action: switch.turn_on
+                    target:
+                      entity_id: switch.life_the_universe_and_everything_charge
+                  - action: script.ev_watchdog_report
+                    data:
+                      message: >
+                        Still only {{ current }} A after re-sending the amps; paused and resumed charging once.
+                else:
+                  - action: script.ev_watchdog_report
+                    data:
+                      message: >
+                        Paused charging at {{ current }} A; the session ended during the pause, so not resumed.
+          - conditions:
+              - condition: state
+                entity_id: binary_sensor.ev_current_shortfall
+                state: "on"
+              - condition: template
+                value_template: "{{ level == 2 }}"
+            sequence:
+              - action: input_number.set_value
+                target:
+                  entity_id: input_number.ev_watchdog_level
+                data:
+                  value: 3
+              - action: script.ev_watchdog_report
+                data:
+                  message: >
+                    Still only {{ current }} A after pausing and resuming; no further action this session.
+                    Check the Tesla app.
+
+  # input_number has no persistent default: without "initial" it starts at its
+  # minimum, with "initial" every restart overwrites the user's value.
+  - id: ev_initialise_settings
+    alias: "EV: initialise watchdog and consumption settings"
+    mode: single
+    triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: automation_reloaded
+    conditions:
+      - condition: state
+        entity_id: input_boolean.ev_settings_initialised
+        state: "off"
+    actions:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.ev_main_fuse_current
+        data:
+          value: 25
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.ev_roundtrip_distance_km
+        data:
+          value: 125
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.ev_consumption_margin
+        data:
+          value: 1
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.ev_consumption_window_km
+        data:
+          value: 500
+      - action: input_boolean.turn_on
+        target:
+          entity_id:
+            - input_boolean.ev_hold_green_while_waiting
+            - input_boolean.ev_settings_initialised

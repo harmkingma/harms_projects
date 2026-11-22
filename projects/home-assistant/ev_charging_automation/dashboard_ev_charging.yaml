@@ -31,6 +31,10 @@ views:
             name: Battery Level
           - entity: number.life_the_universe_and_everything_charge_limit
             name: Car Charge Limit
+          - entity: number.life_the_universe_and_everything_charge_current
+            name: Car Amps Setting
+          - entity: sensor.ev_charging_current
+            name: Drawing Now
 
       # -----------------------------------------------------------------------
       - type: horizontal-stack
@@ -125,8 +129,8 @@ views:
         title: Charging Parameters
         show_header_toggle: false
         entities:
-          - entity: input_number.ev_roundtrip_consumption
-            name: Roundtrip Consumption
+          - entity: input_boolean.ev_hold_green_while_waiting
+            name: Hold In Green While Waiting
           - entity: input_number.ev_regular_charge_limit
             name: Regular Charge Limit
           - entity: input_number.ev_min_safe_soc
@@ -180,6 +184,63 @@ views:
             name: Last 100% Charge Start
           - entity: binary_sensor.ev_night_session_pending
             name: Night Session Pending
+          - entity: sensor.ev_idle_charger_mode
+            name: Charger Mode While Idle
+
+      # -----------------------------------------------------------------------
+      - type: entities
+        title: Consumption (learned)
+        show_header_toggle: false
+        entities:
+          - entity: sensor.ev_consumption_rate
+            name: Learned Consumption
+          - type: attribute
+            entity: sensor.ev_consumption_rate
+            attribute: kwh_per_100km
+            name: Learned Consumption (kWh/100 km)
+          - entity: sensor.ev_roundtrip_consumption_effective
+            name: Roundtrip Consumption Used
+          - type: attribute
+            entity: sensor.ev_roundtrip_consumption_effective
+            attribute: source
+            name: Source
+          - entity: sensor.ev_consumption_history
+            name: Distance Learned From
+          - type: attribute
+            entity: sensor.ev_consumption_history
+            attribute: last_event
+            name: Last Drive
+          - type: divider
+          - entity: input_number.ev_roundtrip_distance_km
+            name: Roundtrip Distance
+          - entity: input_number.ev_consumption_margin
+            name: Margin
+          - entity: input_number.ev_consumption_window_km
+            name: Learning Window
+          - entity: input_number.ev_roundtrip_consumption
+            name: Manual Fallback (< 100 km learned)
+
+      # -----------------------------------------------------------------------
+      - type: entities
+        title: Charge Watchdog
+        show_header_toggle: false
+        entities:
+          - entity: binary_sensor.ev_current_shortfall
+            name: Unexplained Low Current
+          - entity: sensor.ev_charging_current
+            name: Drawing Now
+          - entity: sensor.ev_charge_current_target
+            name: Car Amps Target
+          - entity: sensor.ev_current_headroom
+            name: Room Under Main Fuse
+          - entity: counter.ev_watchdog_corrections
+            name: Corrections (total)
+          - entity: input_datetime.ev_watchdog_last_action
+            name: Last Correction
+          - entity: input_number.ev_watchdog_level
+            name: Escalation Step (this session)
+          - entity: input_number.ev_main_fuse_current
+            name: Main Fuse
 
       # -----------------------------------------------------------------------
       - type: entities

@@ -8,6 +8,7 @@ Tesla Model 3 (Tesla Fleet) + Alfen Eve Single S-line + HomeWizard P1 + solar.
 |---|---|
 | `packages/ev_charging.yaml` | All helpers, template sensors, scripts and automations |
 | `dashboard_ev_charging.yaml` | Dashboard view definition |
+| `tests/test_ev_charging.py` | Behavioural tests in a real Home Assistant core (see [Tests](#tests)) |
 
 Requires **Home Assistant 2024.10+** (uses the `triggers:` / `conditions:` / `actions:` syntax).
 
@@ -21,11 +22,17 @@ The package assumes these entity IDs. Verify each one in **Developer Tools → S
 |---|---|
 | `switch.life_the_universe_and_everything_charge` | Start/stop charging |
 | `sensor.life_the_universe_and_everything_battery_level` | Battery % |
+| `sensor.life_the_universe_and_everything_odometer` | Learned consumption (disabled by default in Tesla Fleet — enable it) |
+| `sensor.life_the_universe_and_everything_charge_energy_added` | Learned consumption: detects charging on the way |
 | `number.life_the_universe_and_everything_charge_limit` | Car charge limit |
+| `number.life_the_universe_and_everything_charge_current` | Car's amps setting, kept at the charger maximum |
 | `button.life_the_universe_and_everything_wake` | Wake the car before a night session |
 | `select.ev_charger_solar_charging_mode` | Alfen mode (`Comfort` / `Disable` / `Green`) |
-| `sensor.ev_charger_status_code_socket_1_2` | Alfen socket status — used to detect plug-in |
+| `sensor.ev_charger_status_code_socket_1_2` | Alfen socket status — used to detect plug-in and load balancing |
+| `sensor.ev_charger_current_l1_socket_1` … `l3` | Alfen phase currents — what the car really draws |
+| `number.ev_charger_max_station_current` | Alfen maximum current (16 A) |
 | `sensor.p1_meter_power` | Grid power, negative = export |
+| `sensor.p1_meter_power_phase_1` … `3` | Grid power per phase, for the room under the main fuse |
 | `sensor.steca_inverter_ac_power` | Solar production in watts, used by the solar stop gate |
 
 Confirm the select's exact state strings are `Comfort` and `Disable` (case-sensitive).
@@ -78,7 +85,7 @@ After restart the `input_number` helpers start at their minimum. Set them in **S
 
 | Helper | Suggested starting value |
 |---|---|
-| Roundtrip Consumption | `26` (summer) / `35` (winter) |
+| Roundtrip Consumption | `33` — only a fallback until 100 km has been learned, see [Learned consumption](#learned-consumption) |
 | Regular Charge Limit | `80` |
 | Trip Target SOC | `90` (only used while a trip is armed) |
 | Min. Safe SOC | `30` (hard floor, triggers max-power top-up) |
@@ -95,6 +102,16 @@ After restart the `input_number` helpers start at their minimum. Set them in **S
 | Work Departure Time | Your usual time |
 | Workday toggles | Turn on the days you're going to the office this week |
 | Last Known SOC | Set once to the car's current battery %, so planning works before the first poll |
+
+These are set once automatically on the first start (by `ev_initialise_settings`) and are yours to change afterwards:
+
+| Helper | Default |
+|---|---|
+| Hold In Green While Waiting | on |
+| Main Fuse Current | `25 A` |
+| Roundtrip Distance | `125 km` |
+| Consumption Margin | `1 %` |
+| Consumption Learning Window | `500 km` |
 
 ---
 
@@ -132,6 +149,8 @@ required = 100                                     if conditioning is due
 ```
 
 `run` = number of consecutive enabled workdays starting at the next departure day. Weekends always break the run.
+
+`consumption` is `sensor.ev_roundtrip_consumption_effective`: the [learned consumption](#learned-consumption) once 100 km has been learned, otherwise the manual **Roundtrip Consumption**. The quick test in step 8 uses the manual value.
 
 ### Conditioning schedule
 
@@ -174,13 +193,34 @@ Your car starts charging the moment you plug in. The guard stops it — but **on
 
 ### Mode handling
 
+The Alfen has three solar charging modes:
+
+| Alfen mode | What the charger offers the car |
+|---|---|
+| `Disable` | Solar logic off: full power from the grid (3×16 A, limited only by load balancing) |
+| `Comfort` | At least the comfort level (1400 W ≈ 6 A), from the grid if needed, plus solar surplus |
+| `Green` | Only solar surplus. Without sun it offers **0 A**, so the car cannot charge |
+
 | Phase | Alfen mode | Who controls it |
 |---|---|---|
 | Daytime solar | `Comfort` | Solar automations active |
 | Night top-up | `Disable` | Set by night start, restored to `Comfort` by night end |
 | Manual max power | `Disable` | Set by Max Power button, restored by Set Comfort button |
+| Idle, night session pending, outside the solar window | `Green` | `ev_idle_mode_sync` (if **Hold In Green While Waiting** is on) |
+| Idle, safety or night start due | `Disable` | `ev_idle_mode_sync` |
+| Idle otherwise | `Comfort` | `ev_idle_mode_sync` |
 
 Because the solar stop automation requires `Comfort`, it can never interrupt a night session.
+
+#### Holding the mode while idle
+
+The car starts charging by itself the moment it is plugged in, in whatever mode the charger is in. Before, a plug-in at 18:30 with a night session planned for 01:00 started at 6 A in Comfort, and the guard stopped it a minute later (seen on 20 Nov 2026). `sensor.ev_idle_charger_mode` works out the mode the next session needs, and `ev_idle_mode_sync` holds the charger in it whenever no current flows and no session is running:
+
+- **`Green`** while a night session is pending outside the solar window: the charger offers nothing, so the car just waits. The Tesla app shows it waiting for the charger. Press **Start Max Power** to charge now.
+- **`Disable`** when a safety or night start is due: a car plugged in late starts straight at full power and the session adopts it. The guard leaves such a charge alone.
+- **`Comfort`** otherwise, so charging from the Tesla app works as before.
+
+It never changes the mode while current flows. Turn off **Hold In Green While Waiting** if the car does not resume after waiting in `Green`; the charger then stays in `Comfort` while waiting, as before.
 
 The solar stop automation also requires production below the configured threshold
 on average over the configured number of minutes. It samples the inverter once
@@ -208,11 +248,13 @@ The car is woken implicitly when the night session issues its first command — 
 
 Tesla's docs are explicit: *"Ensure the vehicle is online before requesting device data or sending commands."* A `switch.turn_on` against a sleeping vehicle wakes it but the command itself is lost, so the first attempt silently does nothing and charging only begins on a later retry.
 
-`script.ev_begin_charging` handles this and is used by all three session starts:
+`script.ev_begin_charging` handles this and is used by all four session starts (solar, night, safety, Max Power). Each passes the charger mode it needs and, optionally, a charge limit. The order avoids a start in the wrong mode followed by a stop:
 
-1. Calls `script.ev_refresh_car_data`, which no-ops if the car is already awake
-2. Sends `switch.turn_on`
-3. Waits 30 s and verifies the switch actually reports `on`, retrying up to 3 times
+1. Sets the charger mode via `script.ev_set_charger_mode` and waits until the Alfen reports it, retrying up to 3 times. If it never confirms, nothing starts: a persistent notification is created and the session flags are cleared, so the owning automation retries on its next tick
+2. Calls `script.ev_refresh_car_data`, which no-ops if the car is already awake
+3. Raises the car's amps setting to what the charger offers (see [Charge current watchdog](#charge-current-watchdog)). After a mode change it first waits 15 s and refreshes the car, because the car's reported maximum follows the charger
+4. Sets the charge limit. This comes last, because raising the limit above the SOC makes the car start by itself
+5. Sends `switch.turn_on` unless the car is already charging, and verifies the switch actually reports `on`, retrying up to 3 times
 
 This costs nothing extra in practice — the wake was already being incurred by the dropped command, just unreliably and without the wait that makes it succeed.
 
@@ -300,7 +342,8 @@ The car starts charging by itself the moment it is plugged in, so no automation 
 |---|---|
 | Solar window, Comfort mode, surplus available, below the ceiling | **Adopted** as a solar session — the normal solar stop rule now governs it |
 | Solar window, no surplus | Stopped. No cooldown is stamped, so solar starts as soon as surplus appears |
-| Timed night session pending | Stopped |
+| Timed night session pending | Stopped (with the Green hold on, the car can't start by itself here at all outside the solar window) |
+| A safety or night start is due | Left alone: the charger is held in `Disable` and that session adopts the charge within 5 minutes |
 | Outside both | Left alone, so charging started from the Tesla app still works |
 
 Charging is detected with `binary_sensor.ev_charging_active`, derived from the locally polled Alfen status. The Tesla charge switch can lag by a full polling interval after the car starts on its own, which is why it isn't used for this.
@@ -308,6 +351,65 @@ Charging is detected with `binary_sensor.ev_charging_active`, derived from the l
 ### 3. Deadline charging
 
 Workday or trip deadlines trigger a max-power session only when solar won't get there in time. Unchanged.
+
+---
+
+## Charge current watchdog
+
+On 18 Nov 2026 a night session charged at about 5 A per phase for 2.5 hours on a free 16 A charger. The house used only 1.2–1.5 kW per phase, so load balancing wasn't the cause. The charger reported `Charging Normal`, and the car ran at 16 A the moment the amps were raised in the Tesla app. The limit was **the car's own amps setting** (`number.life_the_universe_and_everything_charge_current`). Tesla remembers a lowered setting per location, and the car also reports a maximum (`max` attribute) that follows what the charger offers: 6 A in Comfort without sun.
+
+Load balancing works through the charger's pilot signal, independent of that setting. So the car should always ask for the charger maximum, and the Alfen does the limiting. When a large load disappears, the charger raises its offer again and the car follows.
+
+**Prevention.** `script.ev_begin_charging` raises the car's amps to `sensor.ev_charge_current_target` at every session start: the charger maximum (`number.ev_charger_max_station_current`, 16 A), capped by the car's reported maximum. Home Assistant rejects anything above that maximum, which is why this happens after the charger mode is confirmed.
+
+**Watchdog.** `ev_charge_watchdog` checks every 5 minutes while a session owned by this package is charging. It takes at most one action per 10 minutes, the first that applies:
+
+| Situation | Action |
+|---|---|
+| Night, safety or Max Power session, but the charger isn't in `Disable` | Switches it back to `Disable` |
+| The car asks less than the charger offers, and the Alfen isn't load balancing | Raises the car's amps to the target |
+| `binary_sensor.ev_current_shortfall` on (see below), first time this session | Nudges the amps: target − 1 A, then the target again 20 s later |
+| Shortfall still on, second time | Pauses charging for 60 s and resumes, once per session |
+| Shortfall still on, third time | Only reports |
+
+`binary_sensor.ev_current_shortfall` turns on after **15 minutes** of a night, safety or Max Power session in `Disable` drawing more than 3 A below the charger maximum, while nothing explains it:
+
+- the Alfen does not report `Load Balancing Limited` or `Load Balancing Forced Off`;
+- `sensor.ev_current_headroom` (room on the tightest phase: main fuse − P1 phase power ÷ 230 V + the car's own current) is at least the charger maximum;
+- the SOC is more than 3 points below the car's charge limit, which excludes the normal taper at the end of a charge.
+
+Every action creates a persistent notification (**EV charge watchdog**), adds a logbook entry and increases `counter.ev_watchdog_corrections`. **Last Correction** and the escalation step for the current session are on the dashboard. Each action costs one Fleet command, and the shortfall steps one data request.
+
+---
+
+## Learned consumption
+
+The workday planning needs the SOC a roundtrip costs. Instead of setting it by hand per season, it is learned from the odometer and the SOC.
+
+`sensor.ev_consumption_history` checks the car every 5 minutes, once odometer and SOC have been stable for a minute. Tesla Fleet writes both as separate updates of one poll, and waiting means both values come from the same poll.
+
+| Since the last check | Treatment |
+|---|---|
+| The car moved | Driving segment: kilometres and SOC used are added |
+| The car moved but the SOC rose, or energy was added | Skipped: charged on the way |
+| The car did not move but the SOC changed | Ignored: parked drain or home charging |
+
+Only the most recent **Consumption Learning Window** (default 500 km, about a week of commuting) counts. That way the value follows the seasons by itself, while staying long enough that the 1 % SOC rounding of single drives evens out.
+
+- `sensor.ev_consumption_rate`: learned SOC per 100 km, available from 100 km of data. The `kwh_per_100km` attribute uses the usable capacity from the [battery health package](../ev_battery_health/README.md) when it has one, otherwise its reference capacity, otherwise 60 kWh.
+- `sensor.ev_roundtrip_consumption_effective`: rate × **Roundtrip Distance** (125 km) × (1 + **Consumption Margin**). Used by `sensor.ev_required_soc`. Its `source` attribute shows `learned` or `manual`; below 100 km of data it falls back to the manual **Roundtrip Consumption**.
+
+The week of 16–21 Nov 2026 gave 532 km for 132 % SOC: 24.8 %/100 km, so 31 % per roundtrip (the manual value was 33 %), about 14.9 kWh/100 km.
+
+The history can be cleared or seeded from **Developer Tools → Events** with event type `ev_consumption_command`:
+
+```yaml
+command: seed   # or: clear
+km: 532
+soc: 132
+```
+
+Seeding adds one segment of that size, for example measured data so the learned value works straight after installing.
 
 ---
 
@@ -339,7 +441,7 @@ The trick is to move the departure time so the calculated start lands in the pas
 3. Set **Work Departure Time** to roughly 1 hour from now
 4. Enable today's (or tomorrow's) workday toggle so `sensor.ev_next_departure` resolves
 5. `sensor.ev_night_charge_start` should now show a time in the past
-6. Within 5 minutes the session starts: charger switches to `Disable`, charge limit is set, charging begins
+6. Within 5 minutes the session starts: charger switches to `Disable` (confirmed), the car's amps go to 16 A, the charge limit is set, charging begins
 
 Press **Stop Charging** to abort, then restore your real departure time.
 
@@ -380,7 +482,8 @@ Estimated monthly cost for this package at a 30-minute polling interval:
 | Wakes (2–5/day, one per session start against a sleeping car) | 60–150 | $1.20 – $3.00 |
 | Refresh-loop data requests | 200–450 | $0.40 – $0.90 |
 | Commands (solar, night session, limit sets) | ~300 | $0.30 |
-| **Total** | | **$4.80 – $7.10** |
+| Amps refresh at session start, watchdog corrections | ~60 data + a few commands | ~$0.12 |
+| **Total** | | **$4.90 – $7.20** |
 
 Inside the $10 discount, but without huge margin. **Check your real usage** at [developer.tesla.com/dashboard/usage](https://developer.tesla.com/dashboard/usage) after the first couple of weeks rather than relying on this estimate.
 
@@ -427,7 +530,11 @@ Migrating to **Fleet Telemetry** streaming eliminates polling entirely — the c
 | `sensor.ev_charge_deficit` is `unavailable` | No SOC has ever been cached. Wake the car once, or set `input_number.ev_last_known_soc` manually |
 | `binary_sensor.ev_car_plugged_in` is wrong | Check what `sensor.ev_charger_status_code_socket_1_2` reports and add that value to the exclusion list in the template |
 | `sensor.ev_soc_age` shows `999` | SOC has never been mirrored — same fix as above |
-| Charging stops right after plugging in | Expected, if a night session is pending. Press **Start Max Power** to override |
+| Charging stops right after plugging in | Expected, if a night session is pending and the Green hold is off. Press **Start Max Power** to override |
+| Car shows "waiting for charger" after plugging in | Expected while a night session is pending: the charger is held in `Green`. Press **Start Max Power** to charge now, or turn off **Hold In Green While Waiting** |
+| "EV charger mode not confirmed" notification | The Alfen did not switch within 3 × 30 s. Check the Alfen integration; the session retries every 5 minutes |
+| "EV charge watchdog" notification | The watchdog corrected a session; the message says what it found. Repeated corrections every night point at the car or the charger, not the automation |
+| `sensor.ev_consumption_rate` stays `unavailable` | Less than 100 km learned. Check that the Tesla odometer entity is enabled, or seed the history (see [Learned consumption](#learned-consumption)) |
 | Conditioning always shows due | `input_datetime.ev_last_full_charge` is unset — set it manually once |
 | Night charge never starts | Check cable connected, deficit > 0, and that `ev_max_power_override` is off |
 | Automations don't appear in the UI editor | Expected — YAML package automations are read-only in the UI. Edit the file and reload |
@@ -468,4 +575,15 @@ Changes to `input_boolean` / `input_number` / `input_datetime` definitions requi
 
 ## Seasonal adjustment
 
-The only value you need to change between summer and winter is **Roundtrip Consumption** (`26` → `35`). Everything downstream recalculates automatically.
+Not needed any more: the [learned consumption](#learned-consumption) follows the season by itself. **Roundtrip Consumption** is only the fallback until 100 km has been learned. Change **Roundtrip Distance** if your commute changes.
+
+---
+
+## Tests
+
+The tests load the package into a real Home Assistant core and simulate the Tesla and the Alfen. They use the shared Home Assistant virtual environment (`tools\setup.cmd home-assistant` creates it):
+
+```powershell
+cd projects\home-assistant\ev_charging_automation
+..\..\..\.venvs\home-assistant\Scripts\python.exe -m pytest -q
+```
