@@ -1,0 +1,38 @@
+name: Energy Analyzer
+version: "0.3.0"
+slug: energy_analyzer
+description: Nightly year simulation of a home battery and fixed vs dynamic energy contracts on your P1 history.
+arch:
+  - aarch64
+  - amd64
+init: false
+startup: application
+boot: auto
+services:
+  - mqtt:need
+# Reads helpers and long-term statistics and calls the EnergyZero price actions.
+homeassistant_api: true
+options:
+  import_statistic: sensor.p1_meter_energy_import
+  export_statistic: sensor.p1_meter_energy_export
+  gas_statistic: sensor.gas_meter_gas
+  days: 365
+  run_at: "04:15"
+  # Months without meter data are estimated from the real weather of those days
+  # (Open-Meteo archive; your HA location rounded to 0.01 degrees is sent).
+  estimate_missing: true
+  pv_kwp: 4.1
+  pv_tilt: 35
+  pv_azimuth: -22
+schema:
+  import_statistic: str
+  export_statistic: str
+  gas_statistic: str
+  solar_statistic: str?
+  energyzero_config_entry: str?
+  days: int(14,730)
+  run_at: match(^([01]\d|2[0-3]):[0-5]\d$)
+  estimate_missing: bool
+  pv_kwp: float(0.1,100)
+  pv_tilt: float(0,90)
+  pv_azimuth: float(-180,180)

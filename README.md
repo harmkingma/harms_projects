@@ -11,6 +11,7 @@ Open [harms_projects.code-workspace](harms_projects.code-workspace) in VS Code.
 | Water meter firmware + board-test firmware | [projects/esphome/espcam-water](projects/esphome/espcam-water) |
 | Dual-temperature firmware, wiring diagram, supporting tools/photos | [projects/esphome/floorheating-temp-monitor](projects/esphome/floorheating-temp-monitor) |
 | Seven imported HA automations + water-meter packages/dashboard | [projects/home-assistant](projects/home-assistant) |
+| Home battery / fixed vs dynamic contract analysis (HA package, dashboard, Energy Analyzer add-on) | [projects/home-assistant/home_battery](projects/home-assistant/home_battery) |
 | Camera holder and presence box CAD/STL/STEP | [projects/hardware/espcam-water](projects/hardware/espcam-water) |
 | Dual-temperature enclosure, print files and board reference | [projects/hardware/floorheating-temp-monitor](projects/hardware/floorheating-temp-monitor) |
 | Future schematic/PCB designs | [projects/electronics](projects/electronics) |

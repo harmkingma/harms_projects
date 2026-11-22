@@ -1,0 +1,1013 @@
+# =============================================================================
+# Home Battery Package - virtual home battery, fixed vs dynamic contract, 2029
+# =============================================================================
+# Read-only analysis: it never controls a device. READS these entities:
+#   sensor.p1_meter_energy_import        HomeWizard P1, kWh total (all tariffs)
+#   sensor.p1_meter_energy_export        HomeWizard P1, kWh total
+#   sensor.p1_meter_power                HomeWizard P1, W, negative = export
+#   sensor.steca_inverter_ac_power       solar production, W
+#   sensor.gas_meter_gas                 HomeWizard gas, m3 total
+#   sensor.energyzero_today_energy_current_hour_price   EnergyZero, market price incl. VAT
+#   sensor.energyzero_today_gas_current_hour_price      EnergyZero, gas market price incl. VAT
+# and, only for the consumption breakdown:
+#   sensor.airco_masterbedroom_energy, sensor.airco_slaapkamer_2_energy   airco.yaml
+#   sensor.bathroom_group_power                                          bathroom_radiator.yaml
+#   sensor.life_the_universe_and_everything_charge_energy_added          Tesla Fleet
+# Find-and-replace here if yours differ. Requires a Home Assistant version whose
+# energyzero.get_energy_prices action has the "interval" option (2026.11 has it,
+# 2026.2 does not).
+#
+# PRICES
+# Install the EnergyZero integration (Settings > Devices & services, no account
+# needed) and set its electricity interval to Quarter-hourly. Every 15 minutes
+# sensor.hb_electricity_prices stores today's and (from about 13:00) tomorrow's
+# quarter-hour market prices incl. VAT. All-in prices:
+#   dynamic   market + markup + energy tax; export = market (excl. VAT unless
+#             "Dynamic Export Incl. VAT") - feed-in fee
+#   fixed     your fixed all-in price; export = feed-in compensation - feed-in
+#             costs (net metering ends 1 Jan 2027, so no netting any more)
+#   2029      + an assumed time-dependent network tariff: "Grid Rate" x the hourly
+#             weight (winter Oct-Mar / summer Apr-Sep profiles, ACM draft
+#             codebesluit of 8 Oct 2026). Export carries no network tariff. The
+#             fixed network part drops ("Grid Fixed Change", EUR/year), so 2029
+#             totals are comparable with 2027 ones. The network costs that stay
+#             the same in every scenario are left out of all totals.
+#
+# VIRTUAL BATTERIES
+# Every minute, the measured import/export of that minute (P1 counters) is
+# replayed through one virtual battery per tariff (fixed 2027, dynamic 2027,
+# fixed 2029, dynamic 2029), all with the same capacity/power/efficiency:
+#   - surplus is always stored
+#   - import is covered only when the current price is among the n most expensive
+#     known quarter-hours, n = quarters the stored (+ expected solar) energy lasts
+#     at the typical load (average import since tracking start)
+#   - grid charging when the price is among the cheapest quarters needed to fill
+#     up (leaving room for the expected solar surplus) and the value later (mean
+#     of the most expensive quarters one full battery covers) x round trip beats
+#     it by at least "Min. Spread"
+#   - expected surplus = yesterday's export in the same hours (persistence)
+#   - never discharges into the grid; standby consumption always from the grid
+# With a flat price (fixed 2027) this is plain self-consumption. The Energy
+# Analyzer add-on runs the same rules on the last year of hourly statistics
+# (addon/energy_analyzer/energy_analyzer/model.py); keep both in step.
+# The EV and the aircos are in the meter data, so a real battery would also
+# cover (or compete with) them exactly as simulated; solar EV charging keeps
+# priority because the battery only sees what the EV leaves for export.
+#
+# RUNNING TOTALS AND PROJECTION
+# Trigger based sensors (state restored after restarts) add every minute's cost
+# per scenario. The projection scales them to a year from 7 days on; it is
+# season-biased (winter has no surplus), the add-on's year simulation is not.
+# "Reset statistics" (script) restarts all totals and the tracking period.
+# =============================================================================
+
+input_boolean:
+  hb_initialised:
+    name: HB Initialised
+    icon: mdi:check-decagram
+
+  hb_dynamic_export_vat:
+    name: HB Dynamic Export Incl. VAT
+    icon: mdi:percent
+
+input_number:
+  # --- battery ---
+  hb_battery_capacity:
+    name: HB Battery Usable Capacity
+    min: 0.5
+    max: 50
+    step: 0.1
+    unit_of_measurement: kWh
+    mode: box
+    icon: mdi:home-battery
+  hb_battery_power:
+    name: HB Battery Power
+    min: 0.1
+    max: 20
+    step: 0.1
+    unit_of_measurement: kW
+    mode: box
+    icon: mdi:flash
+  hb_battery_efficiency:
+    name: HB Battery Round-Trip Efficiency
+    min: 50
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    mode: box
+    icon: mdi:battery-sync
+  hb_battery_standby:
+    name: HB Battery Standby Consumption
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: W
+    mode: box
+    icon: mdi:power-sleep
+  hb_battery_min_spread:
+    name: HB Battery Min. Spread (grid charging)
+    min: 0
+    max: 0.5
+    step: 0.01
+    unit_of_measurement: €/kWh
+    mode: box
+    icon: mdi:arrow-expand-vertical
+  hb_battery_investment:
+    name: HB Battery Investment
+    min: 0
+    max: 50000
+    step: 50
+    unit_of_measurement: €
+    mode: box
+    icon: mdi:cash
+  hb_battery_lifetime:
+    name: HB Battery Lifetime
+    min: 1
+    max: 30
+    step: 1
+    unit_of_measurement: years
+    mode: box
+    icon: mdi:calendar-clock
+
+  # --- fixed contract (from 2027, no net metering) ---
+  hb_fixed_price:
+    name: HB Fixed Price (all-in)
+    min: 0
+    max: 2
+    step: 0.001
+    unit_of_measurement: €/kWh
+    mode: box
+    icon: mdi:currency-eur
+  hb_fixed_feed_in:
+    name: HB Fixed Feed-in Compensation
+    min: -0.5
+    max: 1
+    step: 0.001
+    unit_of_measurement: €/kWh
+    mode: box
+    icon: mdi:transmission-tower-export
+  hb_fixed_feed_in_cost:
+    name: HB Fixed Feed-in Costs
+    min: 0
+    max: 1
+    step: 0.001
+    unit_of_measurement: €/kWh
+    mode: box
+    icon: mdi:cash-minus
+  hb_fixed_monthly:
+    name: HB Fixed Monthly Fee
+    min: 0
+    max: 50
+    step: 0.01
+    unit_of_measurement: €
+    mode: box
+    icon: mdi:calendar-month
+
+  # --- dynamic contract ---
+  hb_dynamic_markup:
+    name: HB Dynamic Markup (incl. VAT)
+    min: 0
+    max: 0.5
+    step: 0.001
+    unit_of_measurement: €/kWh
+    mode: box
+    icon: mdi:plus
+  hb_energy_tax:
+    name: HB Energy Tax (incl. VAT)
+    min: 0
+    max: 0.5
+    step: 0.0001
+    unit_of_measurement: €/kWh
+    mode: box
+    icon: mdi:bank
+  hb_dynamic_feed_in_fee:
+    name: HB Dynamic Feed-in Fee
+    min: -0.5
+    max: 0.5
+    step: 0.001
+    unit_of_measurement: €/kWh
+    mode: box
+    icon: mdi:cash-minus
+  hb_dynamic_monthly:
+    name: HB Dynamic Monthly Fee
+    min: 0
+    max: 50
+    step: 0.01
+    unit_of_measurement: €
+    mode: box
+    icon: mdi:calendar-month
+
+  # --- gas ---
+  hb_gas_fixed_price:
+    name: HB Gas Fixed Price (all-in)
+    min: 0
+    max: 5
+    step: 0.001
+    unit_of_measurement: €/m³
+    mode: box
+    icon: mdi:fire
+  hb_gas_dynamic_markup:
+    name: HB Gas Dynamic Markup (incl. VAT)
+    min: 0
+    max: 1
+    step: 0.001
+    unit_of_measurement: €/m³
+    mode: box
+    icon: mdi:plus
+  hb_gas_tax:
+    name: HB Gas Energy Tax (incl. VAT)
+    min: 0
+    max: 2
+    step: 0.0001
+    unit_of_measurement: €/m³
+    mode: box
+    icon: mdi:bank
+  hb_gas_fixed_monthly:
+    name: HB Gas Fixed Monthly Fee
+    min: 0
+    max: 50
+    step: 0.01
+    unit_of_measurement: €
+    mode: box
+    icon: mdi:calendar-month
+  hb_gas_dynamic_monthly:
+    name: HB Gas Dynamic Monthly Fee
+    min: 0
+    max: 50
+    step: 0.01
+    unit_of_measurement: €
+    mode: box
+    icon: mdi:calendar-month
+
+  # --- assumed 2029 time-dependent network tariff ---
+  hb_grid_rate:
+    name: HB Grid Rate 2029 (weight 1.0)
+    min: 0
+    max: 1
+    step: 0.001
+    unit_of_measurement: €/kWh
+    mode: box
+    icon: mdi:transmission-tower
+  hb_grid_fixed_change:
+    name: HB Grid Fixed Change 2029
+    min: -1000
+    max: 1000
+    step: 1
+    unit_of_measurement: €
+    mode: box
+    icon: mdi:transmission-tower-off
+
+input_text:
+  # 24 comma-separated weights, index = start hour (local).
+  hb_grid_profile_winter:
+    name: HB Grid Weights Winter (Oct-Mar)
+    max: 255
+    icon: mdi:snowflake
+  hb_grid_profile_summer:
+    name: HB Grid Weights Summer (Apr-Sep)
+    max: 255
+    icon: mdi:white-balance-sunny
+
+input_datetime:
+  hb_tracking_start:
+    name: HB Tracking Start
+    has_date: true
+    has_time: true
+    icon: mdi:calendar-start
+
+# -----------------------------------------------------------------------------
+# Solar and sub-meter energy (Riemann sums of power sensors)
+# -----------------------------------------------------------------------------
+sensor:
+  - platform: integration
+    source: sensor.steca_inverter_ac_power
+    name: HB Solar Energy
+    unique_id: hb_solar_energy
+    unit_prefix: k
+    unit_time: h
+    method: left
+    round: 3
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    source: sensor.bathroom_group_power
+    name: HB Bathroom Energy
+    unique_id: hb_bathroom_energy
+    unit_prefix: k
+    unit_time: h
+    method: left
+    round: 3
+    max_sub_interval:
+      minutes: 5
+
+utility_meter:
+  hb_import_daily:
+    name: HB Import Daily
+    unique_id: hb_import_daily
+    source: sensor.p1_meter_energy_import
+    cycle: daily
+  hb_export_daily:
+    name: HB Export Daily
+    unique_id: hb_export_daily
+    source: sensor.p1_meter_energy_export
+    cycle: daily
+  hb_solar_daily:
+    name: HB Solar Daily
+    unique_id: hb_solar_daily
+    source: sensor.hb_solar_energy
+    cycle: daily
+  hb_house_daily:
+    name: HB House Consumption Daily
+    unique_id: hb_house_daily
+    source: sensor.hb_house_energy
+    cycle: daily
+    net_consumption: true
+
+template:
+  # ---------------------------------------------------------------------------
+  # Day-ahead prices: today plus tomorrow (once published), per quarter hour.
+  # Stored compactly: start_ts + n x step_s is the start of prices[n].
+  # ---------------------------------------------------------------------------
+  - triggers:
+      - trigger: time_pattern
+        minutes: /15
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: event_template_reloaded
+    conditions:
+      - condition: template
+        value_template: >-
+          {{ config_entry_id('sensor.energyzero_today_energy_current_hour_price') is not none }}
+    # start == end (a date) returns that whole local day; the service fetches
+    # every day from start to end inclusive and fails if one has no prices.
+    actions:
+      - action: energyzero.get_energy_prices
+        response_variable: today
+        data:
+          config_entry: "{{ config_entry_id('sensor.energyzero_today_energy_current_hour_price') }}"
+          incl_vat: true
+          interval: quarter
+          start: "{{ now().date().isoformat() }}"
+          end: "{{ now().date().isoformat() }}"
+      # Tomorrow's prices only exist from about 13:00.
+      - action: energyzero.get_energy_prices
+        continue_on_error: true
+        response_variable: tomorrow
+        data:
+          config_entry: "{{ config_entry_id('sensor.energyzero_today_energy_current_hour_price') }}"
+          incl_vat: true
+          interval: quarter
+          start: "{{ (now() + timedelta(days=1)).date().isoformat() }}"
+          end: "{{ (now() + timedelta(days=1)).date().isoformat() }}"
+    sensor:
+      - name: HB Electricity Prices
+        unique_id: hb_electricity_prices
+        icon: mdi:chart-bell-curve
+        unit_of_measurement: slots
+        state: >-
+          {{ (today.prices | default([]) | count)
+             + ((tomorrow.prices | default([]) | count) if tomorrow is defined and tomorrow else 0) }}
+        attributes:
+          config_entry: "{{ config_entry_id('sensor.energyzero_today_energy_current_hour_price') }}"
+          start_ts: >-
+            {%- set p = (today.prices | default([])) + ((tomorrow.prices | default([])) if tomorrow is defined and tomorrow else []) -%}
+            {{ (p | map(attribute='timestamp') | map('as_timestamp', 0) | min) if p else 0 }}
+          step_s: >-
+            {%- set p = (today.prices | default([])) + ((tomorrow.prices | default([])) if tomorrow is defined and tomorrow else []) -%}
+            {%- set ts = p | map(attribute='timestamp') | map('as_timestamp', 0) | sort | unique | list -%}
+            {{ (ts[1] - ts[0]) | int if ts | count > 1 else 900 }}
+          prices: >-
+            {%- set p = (today.prices | default([])) + ((tomorrow.prices | default([])) if tomorrow is defined and tomorrow else []) -%}
+            {%- set ns = namespace(seen=[], out=[]) -%}
+            {%- for e in p | sort(attribute='timestamp') -%}
+              {%- set ts = as_timestamp(e.timestamp, 0) -%}
+              {%- if ts not in ns.seen -%}
+                {%- set ns.seen = ns.seen + [ts] -%}
+                {%- set ns.out = ns.out + [e.price | float(0) | round(5)] -%}
+              {%- endif -%}
+            {%- endfor -%}
+            {{ ns.out }}
+          tomorrow_available: "{{ tomorrow is defined and tomorrow and (tomorrow.prices | default([]) | count) > 0 }}"
+          updated: "{{ now().isoformat() }}"
+
+  # ---------------------------------------------------------------------------
+  # Simulation state and running totals, written by the hb_tick event.
+  # ---------------------------------------------------------------------------
+  - triggers:
+      - trigger: event
+        event_type: home_battery_tick
+        id: tick
+      - trigger: event
+        event_type: home_battery_reset
+        id: reset
+    sensor:
+      # Meter readings of the last tick, virtual battery charge per tariff,
+      # export profile (persistence forecast) and the typical load.
+      - name: HB Simulation State
+        unique_id: hb_simulation_state
+        device_class: timestamp
+        icon: mdi:state-machine
+        state: "{{ now().isoformat() }}"
+        attributes:
+          import: "{{ trigger.event.data.import if trigger.id == 'tick' else this.attributes.get('import') }}"
+          export: "{{ trigger.event.data.export if trigger.id == 'tick' else this.attributes.get('export') }}"
+          gas: "{{ trigger.event.data.gas if trigger.id == 'tick' else this.attributes.get('gas') }}"
+          ts: "{{ trigger.event.data.ts if trigger.id == 'tick' else this.attributes.get('ts') }}"
+          market: "{{ trigger.event.data.market if trigger.id == 'tick' else this.attributes.get('market') }}"
+          gas_market: "{{ trigger.event.data.gas_market if trigger.id == 'tick' else this.attributes.get('gas_market') }}"
+          soc: "{{ trigger.event.data.soc if trigger.id == 'tick' else {} }}"
+          profile: "{{ trigger.event.data.profile if trigger.id == 'tick' else this.attributes.get('profile', [0] * 24) }}"
+          hour: "{{ trigger.event.data.hour if trigger.id == 'tick' else this.attributes.get('hour', -1) }}"
+          hour_export: "{{ trigger.event.data.hour_export if trigger.id == 'tick' else 0 }}"
+          import_kwh: >-
+            {{ 0 if trigger.id == 'reset'
+               else (this.attributes.get('import_kwh', 0) | float(0) + trigger.event.data.d_imp) | round(5) }}
+          minutes: >-
+            {{ 0 if trigger.id == 'reset'
+               else (this.attributes.get('minutes', 0) | float(0) + trigger.event.data.minutes) | round(3) }}
+          price_gap_minutes: >-
+            {{ 0 if trigger.id == 'reset'
+               else this.attributes.get('price_gap_minutes', 0) | float(0)
+                    + (trigger.event.data.minutes if trigger.event.data.price_gap else 0) }}
+          load_kw: "{{ trigger.event.data.load_kw if trigger.id == 'tick' else 0.4 }}"
+          surplus_kwh: "{{ trigger.event.data.surplus if trigger.id == 'tick' else 0 }}"
+
+      - name: HB Cost Fixed 2027 No Battery
+        unique_id: hb_cost_fixed_2027_no_battery
+        unit_of_measurement: €
+        device_class: monetary
+        state_class: total
+        icon: mdi:cash-multiple
+        state: >-
+          {{ 0 if trigger.id == 'reset' else (this.state | float(0) + trigger.event.data.sim.fixed_2027.none) | round(5) }}
+        attributes: &no_battery_attrs
+          import_kwh: >-
+            {{ 0 if trigger.id == 'reset'
+               else (this.attributes.get('import_kwh', 0) | float(0) + trigger.event.data.d_imp) | round(5) }}
+          export_kwh: >-
+            {{ 0 if trigger.id == 'reset'
+               else (this.attributes.get('export_kwh', 0) | float(0) + trigger.event.data.d_exp) | round(5) }}
+      - name: HB Cost Dynamic 2027 No Battery
+        unique_id: hb_cost_dynamic_2027_no_battery
+        unit_of_measurement: €
+        device_class: monetary
+        state_class: total
+        icon: mdi:cash-multiple
+        state: >-
+          {{ 0 if trigger.id == 'reset' else (this.state | float(0) + trigger.event.data.sim.dynamic_2027.none) | round(5) }}
+        attributes: *no_battery_attrs
+      - name: HB Cost Fixed 2029 No Battery
+        unique_id: hb_cost_fixed_2029_no_battery
+        unit_of_measurement: €
+        device_class: monetary
+        state_class: total
+        icon: mdi:cash-multiple
+        state: >-
+          {{ 0 if trigger.id == 'reset' else (this.state | float(0) + trigger.event.data.sim.fixed_2029.none) | round(5) }}
+        attributes: *no_battery_attrs
+      - name: HB Cost Dynamic 2029 No Battery
+        unique_id: hb_cost_dynamic_2029_no_battery
+        unit_of_measurement: €
+        device_class: monetary
+        state_class: total
+        icon: mdi:cash-multiple
+        state: >-
+          {{ 0 if trigger.id == 'reset' else (this.state | float(0) + trigger.event.data.sim.dynamic_2029.none) | round(5) }}
+        attributes: *no_battery_attrs
+
+      # Battery variants: the tariff key is the middle of the entity id
+      # (sensor.hb_cost_<tariff>_battery), so all four share one template.
+      - name: HB Cost Fixed 2027 Battery
+        unique_id: hb_cost_fixed_2027_battery
+        unit_of_measurement: €
+        device_class: monetary
+        state_class: total
+        icon: mdi:home-battery
+        state: &battery_state >-
+          {%- set t = this.entity_id[15:-8] -%}
+          {{ 0 if trigger.id == 'reset' else (this.state | float(0) + trigger.event.data.sim[t].battery) | round(5) }}
+        attributes: &battery_attrs
+          import_kwh: >-
+            {{ 0 if trigger.id == 'reset' else (this.attributes.get('import_kwh', 0) | float(0)
+               + trigger.event.data.sim[this.entity_id[15:-8]].imp) | round(5) }}
+          export_kwh: >-
+            {{ 0 if trigger.id == 'reset' else (this.attributes.get('export_kwh', 0) | float(0)
+               + trigger.event.data.sim[this.entity_id[15:-8]].exp) | round(5) }}
+          solar_charge_kwh: >-
+            {{ 0 if trigger.id == 'reset' else (this.attributes.get('solar_charge_kwh', 0) | float(0)
+               + trigger.event.data.sim[this.entity_id[15:-8]].sc) | round(5) }}
+          grid_charge_kwh: >-
+            {{ 0 if trigger.id == 'reset' else (this.attributes.get('grid_charge_kwh', 0) | float(0)
+               + trigger.event.data.sim[this.entity_id[15:-8]].gc) | round(5) }}
+          discharge_kwh: >-
+            {{ 0 if trigger.id == 'reset' else (this.attributes.get('discharge_kwh', 0) | float(0)
+               + trigger.event.data.sim[this.entity_id[15:-8]].dis) | round(5) }}
+      - name: HB Cost Dynamic 2027 Battery
+        unique_id: hb_cost_dynamic_2027_battery
+        unit_of_measurement: €
+        device_class: monetary
+        state_class: total
+        icon: mdi:home-battery
+        state: *battery_state
+        attributes: *battery_attrs
+      - name: HB Cost Fixed 2029 Battery
+        unique_id: hb_cost_fixed_2029_battery
+        unit_of_measurement: €
+        device_class: monetary
+        state_class: total
+        icon: mdi:home-battery
+        state: *battery_state
+        attributes: *battery_attrs
+      - name: HB Cost Dynamic 2029 Battery
+        unique_id: hb_cost_dynamic_2029_battery
+        unit_of_measurement: €
+        device_class: monetary
+        state_class: total
+        icon: mdi:home-battery
+        state: *battery_state
+        attributes: *battery_attrs
+
+      - name: HB Cost Gas Fixed
+        unique_id: hb_cost_gas_fixed
+        unit_of_measurement: €
+        device_class: monetary
+        state_class: total
+        icon: mdi:fire
+        state: >-
+          {{ 0 if trigger.id == 'reset' else (this.state | float(0) + trigger.event.data.gas_cost.fixed) | round(5) }}
+        attributes: &gas_attrs
+          gas_m3: >-
+            {{ 0 if trigger.id == 'reset'
+               else (this.attributes.get('gas_m3', 0) | float(0) + trigger.event.data.d_gas) | round(5) }}
+      - name: HB Cost Gas Dynamic
+        unique_id: hb_cost_gas_dynamic
+        unit_of_measurement: €
+        device_class: monetary
+        state_class: total
+        icon: mdi:fire
+        state: >-
+          {{ 0 if trigger.id == 'reset' else (this.state | float(0) + trigger.event.data.gas_cost.dynamic) | round(5) }}
+        attributes: *gas_attrs
+
+      # Export while the dynamic export price was negative (it costs money).
+      - name: HB Negative Price Export
+        unique_id: hb_negative_price_export
+        unit_of_measurement: kWh
+        device_class: energy
+        state_class: total
+        icon: mdi:transmission-tower-off
+        state: >-
+          {{ 0 if trigger.id == 'reset' else (this.state | float(0) + trigger.event.data.neg.kwh) | round(5) }}
+        attributes:
+          cost: >-
+            {{ 0 if trigger.id == 'reset'
+               else (this.attributes.get('cost', 0) | float(0) + trigger.event.data.neg.cost) | round(5) }}
+
+  # ---------------------------------------------------------------------------
+  # EV charging energy (car side) from the Tesla's per-session counter.
+  # ---------------------------------------------------------------------------
+  - triggers:
+      - trigger: state
+        entity_id: sensor.life_the_universe_and_everything_charge_energy_added
+    conditions:
+      - condition: template
+        value_template: "{{ trigger.to_state.state | is_number }}"
+    sensor:
+      - name: HB EV Charged Energy
+        unique_id: hb_ev_charged_energy
+        unit_of_measurement: kWh
+        device_class: energy
+        state_class: total_increasing
+        icon: mdi:car-electric
+        # The counter restarts at 0 every session; a drop means a new session.
+        state: >-
+          {%- set new = trigger.to_state.state | float(0) -%}
+          {%- set last = this.attributes.get('last', 0) | float(0) -%}
+          {{ (this.state | float(0) + (new - last if new >= last else new)) | round(3) }}
+        attributes:
+          last: "{{ trigger.to_state.state | float(0) }}"
+
+  # ---------------------------------------------------------------------------
+  # Live values, prices and the projection
+  # ---------------------------------------------------------------------------
+  - sensor:
+      - name: HB House Power
+        unique_id: hb_house_power
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:home-lightning-bolt
+        availability: "{{ has_value('sensor.p1_meter_power') }}"
+        state: >-
+          {{ (states('sensor.p1_meter_power') | float(0)
+              + [states('sensor.steca_inverter_ac_power') | float(0), 0] | max) | round(0) }}
+
+      # Can briefly step back when the counters update at different moments,
+      # hence state_class total (not total_increasing).
+      - name: HB House Energy
+        unique_id: hb_house_energy
+        unit_of_measurement: kWh
+        device_class: energy
+        state_class: total
+        icon: mdi:home-lightning-bolt-outline
+        availability: >-
+          {{ has_value('sensor.p1_meter_energy_import') and has_value('sensor.p1_meter_energy_export')
+             and has_value('sensor.hb_solar_energy') }}
+        state: >-
+          {{ (states('sensor.p1_meter_energy_import') | float(0) - states('sensor.p1_meter_energy_export') | float(0)
+              + states('sensor.hb_solar_energy') | float(0)) | round(3) }}
+
+      - name: HB Price Dynamic Now
+        unique_id: hb_price_dynamic_now
+        unit_of_measurement: €/kWh
+        device_class: monetary
+        icon: mdi:currency-eur
+        availability: "{{ has_value('sensor.energyzero_today_energy_current_hour_price') }}"
+        state: >-
+          {{ (states('sensor.energyzero_today_energy_current_hour_price') | float(0)
+              + states('input_number.hb_dynamic_markup') | float(0)
+              + states('input_number.hb_energy_tax') | float(0)) | round(4) }}
+        attributes:
+          export: >-
+            {%- set m = states('sensor.energyzero_today_energy_current_hour_price') | float(0) -%}
+            {{ ((m if is_state('input_boolean.hb_dynamic_export_vat', 'on') else m / 1.21)
+                - states('input_number.hb_dynamic_feed_in_fee') | float(0)) | round(4) }}
+          grid_2029: >-
+            {%- set w = state_attr('sensor.hb_grid_weight_now', 'weight') | float(0) -%}
+            {{ (w * states('input_number.hb_grid_rate') | float(0)) | round(4) }}
+
+      - name: HB Grid Weight Now
+        unique_id: hb_grid_weight_now
+        icon: mdi:transmission-tower
+        state: >-
+          {%- set e = 'input_text.hb_grid_profile_' ~ ('winter' if now().month in [1, 2, 3, 10, 11, 12] else 'summer') -%}
+          {%- set v = states(e).split(',') | map('float', -1) | list -%}
+          {{ v[now().hour] if v | count == 24 else 'unknown' }}
+        attributes:
+          weight: >-
+            {%- set e = 'input_text.hb_grid_profile_' ~ ('winter' if now().month in [1, 2, 3, 10, 11, 12] else 'summer') -%}
+            {%- set v = states(e).split(',') | map('float', -1) | list -%}
+            {{ v[now().hour] if v | count == 24 else 0 }}
+
+      - name: HB Gas Price Dynamic Now
+        unique_id: hb_gas_price_dynamic_now
+        unit_of_measurement: €/m³
+        device_class: monetary
+        icon: mdi:fire
+        availability: "{{ has_value('sensor.energyzero_today_gas_current_hour_price') }}"
+        state: >-
+          {{ (states('sensor.energyzero_today_gas_current_hour_price') | float(0)
+              + states('input_number.hb_gas_dynamic_markup') | float(0)
+              + states('input_number.hb_gas_tax') | float(0)) | round(4) }}
+
+      - name: HB Battery SoC Fixed 2027
+        unique_id: hb_battery_soc_fixed_2027
+        unit_of_measurement: "%"
+        icon: mdi:battery-50
+        state: &soc_state >-
+          {%- set t = this.entity_id[22:] -%}
+          {%- set cap = [states('input_number.hb_battery_capacity') | float(5), 0.1] | max -%}
+          {{ (100 * (state_attr('sensor.hb_simulation_state', 'soc') or {}).get(t, 0) | float(0) / cap) | round(1) }}
+      - name: HB Battery SoC Dynamic 2027
+        unique_id: hb_battery_soc_dynamic_2027
+        unit_of_measurement: "%"
+        icon: mdi:battery-50
+        state: *soc_state
+      - name: HB Battery SoC Fixed 2029
+        unique_id: hb_battery_soc_fixed_2029
+        unit_of_measurement: "%"
+        icon: mdi:battery-50
+        state: *soc_state
+      - name: HB Battery SoC Dynamic 2029
+        unique_id: hb_battery_soc_dynamic_2029
+        unit_of_measurement: "%"
+        icon: mdi:battery-50
+        state: *soc_state
+
+      - name: HB Tracking Days
+        unique_id: hb_tracking_days
+        unit_of_measurement: d
+        icon: mdi:calendar-clock
+        availability: "{{ state_attr('sensor.hb_simulation_state', 'minutes') | float(0) > 0 }}"
+        state: "{{ (state_attr('sensor.hb_simulation_state', 'minutes') | float(0) / 1440) | round(1) }}"
+
+      # Running totals scaled to a year (incl. monthly fees); season-biased.
+      - name: HB Live Projection
+        unique_id: hb_live_projection
+        icon: mdi:chart-line
+        availability: "{{ states('sensor.hb_tracking_days') | float(0) >= 7 }}"
+        state: >-
+          {%- set f = 365 / [states('sensor.hb_tracking_days') | float(7), 1] | max -%}
+          {%- set fixed_fee = 12 * states('input_number.hb_fixed_monthly') | float(0) -%}
+          {%- set dyn_fee = 12 * states('input_number.hb_dynamic_monthly') | float(0) -%}
+          {%- set ns = namespace(best='', cost=999999) -%}
+          {%- for t in ['fixed_2027', 'dynamic_2027'] -%}
+            {%- for k in ['no_battery', 'battery'] -%}
+              {%- set c = states('sensor.hb_cost_' ~ t ~ '_' ~ k) | float(0) * f
+                          + (fixed_fee if t.startswith('fixed') else dyn_fee) -%}
+              {%- if c < ns.cost -%}{%- set ns.best, ns.cost = t ~ '_' ~ k, c -%}{%- endif -%}
+            {%- endfor -%}
+          {%- endfor -%}
+          {{ ns.best }}
+        attributes:
+          annual: >-
+            {%- set f = 365 / [states('sensor.hb_tracking_days') | float(7), 1] | max -%}
+            {%- set grid_fixed = states('input_number.hb_grid_fixed_change') | float(0) -%}
+            {%- set ns = namespace(out={}) -%}
+            {%- for t in ['fixed_2027', 'dynamic_2027', 'fixed_2029', 'dynamic_2029'] -%}
+              {%- set fee = 12 * states('input_number.hb_' ~ ('fixed' if t.startswith('fixed') else 'dynamic') ~ '_monthly') | float(0)
+                            + (grid_fixed if t.endswith('2029') else 0) -%}
+              {%- set ns.out = dict(ns.out, **{t: {
+                    'none': (states('sensor.hb_cost_' ~ t ~ '_no_battery') | float(0) * f + fee) | round(0),
+                    'battery': (states('sensor.hb_cost_' ~ t ~ '_battery') | float(0) * f + fee) | round(0)}}) -%}
+            {%- endfor -%}
+            {{ ns.out }}
+          battery: >-
+            {%- set f = 365 / [states('sensor.hb_tracking_days') | float(7), 1] | max -%}
+            {%- set inv = states('input_number.hb_battery_investment') | float(0) -%}
+            {%- set life = states('input_number.hb_battery_lifetime') | float(10) -%}
+            {%- set cap = [states('input_number.hb_battery_capacity') | float(5), 0.1] | max -%}
+            {%- set eta = (states('input_number.hb_battery_efficiency') | float(85) / 100) ** 0.5 -%}
+            {%- set ns = namespace(out={}) -%}
+            {%- for t in ['fixed_2027', 'dynamic_2027', 'fixed_2029', 'dynamic_2029'] -%}
+              {%- set s = (states('sensor.hb_cost_' ~ t ~ '_no_battery') | float(0)
+                           - states('sensor.hb_cost_' ~ t ~ '_battery') | float(0)) * f -%}
+              {%- set dis = state_attr('sensor.hb_cost_' ~ t ~ '_battery', 'discharge_kwh') | float(0) * f -%}
+              {%- set ns.out = dict(ns.out, **{t: {
+                    'saving': s | round(0),
+                    'payback': (inv / s) | round(1) if s > 0 else none,
+                    'lifetime_gain': (s * life - inv) | round(0),
+                    'cycles': (dis / eta / cap) | round(0)}}) -%}
+            {%- endfor -%}
+            {{ ns.out }}
+          gas: >-
+            {%- set f = 365 / [states('sensor.hb_tracking_days') | float(7), 1] | max -%}
+            {{ {'m3': (state_attr('sensor.hb_cost_gas_fixed', 'gas_m3') | float(0) * f) | round(0),
+                'fixed': (states('sensor.hb_cost_gas_fixed') | float(0) * f
+                          + 12 * states('input_number.hb_gas_fixed_monthly') | float(0)) | round(0),
+                'dynamic': (states('sensor.hb_cost_gas_dynamic') | float(0) * f
+                            + 12 * states('input_number.hb_gas_dynamic_monthly') | float(0)) | round(0)} }}
+
+# -----------------------------------------------------------------------------
+# Automations and scripts
+# -----------------------------------------------------------------------------
+script:
+  hb_reset_statistics:
+    alias: "Home battery: reset statistics"
+    icon: mdi:restart
+    sequence:
+      - event: home_battery_reset
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.hb_tracking_start
+        data:
+          timestamp: "{{ now().timestamp() }}"
+
+automation:
+  # input_number has no persistent default: without "initial" it starts at its
+  # minimum, with "initial" every restart overwrites the user's value.
+  - id: hb_initialise_settings
+    alias: "Home battery: initialise settings"
+    mode: single
+    triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: automation_reloaded
+    conditions:
+      - condition: state
+        entity_id: input_boolean.hb_initialised
+        state: "off"
+    actions:
+      # Late-2026 market: energy tax 2027 proposal, typical offers. Enter your own.
+      - repeat:
+          for_each:
+            - [input_number.hb_battery_capacity, 5]
+            - [input_number.hb_battery_power, 2.4]
+            - [input_number.hb_battery_efficiency, 85]
+            - [input_number.hb_battery_standby, 10]
+            - [input_number.hb_battery_min_spread, 0.05]
+            - [input_number.hb_battery_investment, 3000]
+            - [input_number.hb_battery_lifetime, 10]
+            - [input_number.hb_fixed_price, 0.27]
+            - [input_number.hb_fixed_feed_in, 0.09]
+            - [input_number.hb_fixed_feed_in_cost, 0.06]
+            - [input_number.hb_fixed_monthly, 7]
+            - [input_number.hb_dynamic_markup, 0.02]
+            - [input_number.hb_energy_tax, 0.1065]
+            - [input_number.hb_dynamic_feed_in_fee, 0]
+            - [input_number.hb_dynamic_monthly, 7]
+            - [input_number.hb_gas_fixed_price, 1.72]
+            - [input_number.hb_gas_dynamic_markup, 0.08]
+            - [input_number.hb_gas_tax, 0.7457]
+            - [input_number.hb_gas_fixed_monthly, 7]
+            - [input_number.hb_gas_dynamic_monthly, 7]
+            - [input_number.hb_grid_rate, 0.17]
+            - [input_number.hb_grid_fixed_change, -240]
+          sequence:
+            - action: input_number.set_value
+              target:
+                entity_id: "{{ repeat.item[0] }}"
+              data:
+                value: "{{ repeat.item[1] }}"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.hb_grid_profile_winter
+        data:
+          value: "0.48,0.48,0.48,0.48,0.48,0.48,0.48,0.48,0.48,0.48,0.48,0.48,0.48,0.48,0.48,0.48,0.65,1,1,1,1,1,0.65,0.48"
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.hb_grid_profile_summer
+        data:
+          value: "0.48,0.48,0.48,0.48,0.48,0.48,0.31,0.31,0.31,0.31,0,0,0,0,0,0,0,0.31,0.65,0.65,0.65,0.65,0.65,0.65"
+      - action: input_datetime.set_datetime
+        target:
+          entity_id: input_datetime.hb_tracking_start
+        data:
+          timestamp: "{{ now().timestamp() }}"
+      - action: input_boolean.turn_on
+        target:
+          entity_id: input_boolean.hb_initialised
+
+  # Replays the last minute's metered import/export through the virtual
+  # batteries (see header) and fires home_battery_tick with the results.
+  - id: hb_tick
+    alias: "Home battery: simulation tick"
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: time_pattern
+        minutes: /1
+    conditions:
+      - condition: state
+        entity_id: input_boolean.hb_initialised
+        state: "on"
+    variables:
+      st: sensor.hb_simulation_state
+      tariffs: [fixed_2027, dynamic_2027, fixed_2029, dynamic_2029]
+      now_ts: "{{ now().timestamp() }}"
+      imp_now: "{{ states('sensor.p1_meter_energy_import') | float(-1) }}"
+      exp_now: "{{ states('sensor.p1_meter_energy_export') | float(-1) }}"
+      gas_now: "{{ states('sensor.gas_meter_gas') | float(-1) }}"
+      last_ts: "{{ state_attr(st, 'ts') | float(0) }}"
+      minutes: "{{ ((now_ts - last_ts) / 60) | round(3) }}"
+      # First tick, a long gap or a missing meter: only re-read the counters.
+      valid: >-
+        {{ last_ts > 0 and 0 < minutes <= 60 and imp_now >= 0 and exp_now >= 0
+           and state_attr(st, 'import') | is_number and state_attr(st, 'export') | is_number }}
+      d_imp: >-
+        {%- set d = imp_now - state_attr(st, 'import') | float(0) -%}
+        {{ d if valid and 0 <= d < minutes else 0 }}
+      d_exp: >-
+        {%- set d = exp_now - state_attr(st, 'export') | float(0) -%}
+        {{ d if valid and 0 <= d < minutes else 0 }}
+      d_gas: >-
+        {%- set d = gas_now - state_attr(st, 'gas') | float(-1) -%}
+        {{ d if valid and gas_now >= 0 and state_attr(st, 'gas') | is_number and 0 <= d < 5 else 0 }}
+      sim_minutes: "{{ minutes if valid else 0 }}"
+      cap: "{{ [states('input_number.hb_battery_capacity') | float(5), 0.1] | max }}"
+      power: "{{ [states('input_number.hb_battery_power') | float(2.4), 0.05] | max }}"
+      rt: "{{ [[states('input_number.hb_battery_efficiency') | float(85) / 100, 0.01] | max, 1] | min }}"
+      eta: "{{ rt ** 0.5 }}"
+      e_max: "{{ power * sim_minutes / 60 }}"
+      standby: "{{ states('input_number.hb_battery_standby') | float(0) / 1000 * sim_minutes / 60 }}"
+      spread: "{{ states('input_number.hb_battery_min_spread') | float(0.05) }}"
+      fix_imp: "{{ states('input_number.hb_fixed_price') | float(0) }}"
+      fix_exp: >-
+        {{ states('input_number.hb_fixed_feed_in') | float(0) - states('input_number.hb_fixed_feed_in_cost') | float(0) }}
+      add_dyn: >-
+        {{ states('input_number.hb_dynamic_markup') | float(0) + states('input_number.hb_energy_tax') | float(0) }}
+      grid_rate: "{{ states('input_number.hb_grid_rate') | float(0) }}"
+      winter: >-
+        {%- set v = states('input_text.hb_grid_profile_winter').split(',') | map('float', -1) | list -%}
+        {{ v if v | count == 24 and v | min >= 0 else [0.48] * 16 + [0.65] + [1.0] * 5 + [0.65, 0.48] }}
+      summer: >-
+        {%- set v = states('input_text.hb_grid_profile_summer').split(',') | map('float', -1) | list -%}
+        {{ v if v | count == 24 and v | min >= 0 else [0.48] * 6 + [0.31] * 4 + [0.0] * 7 + [0.31] + [0.65] * 6 }}
+      prices: "{{ state_attr('sensor.hb_electricity_prices', 'prices') or [] }}"
+      price_start: "{{ state_attr('sensor.hb_electricity_prices', 'start_ts') | float(0) }}"
+      price_step: "{{ [state_attr('sensor.hb_electricity_prices', 'step_s') | float(900), 60] | max }}"
+      slot: "{{ ((now_ts - price_start) / price_step) | int(-1) if price_start > 0 else -1 }}"
+      price_gap: "{{ not (0 <= slot < prices | count) }}"
+      # Without a price list: the integration's current price, else the last one.
+      fallback_market: >-
+        {{ states('sensor.energyzero_today_energy_current_hour_price')
+           | float(state_attr(st, 'market') | float(0.12)) }}
+      # [market price, 2029 grid weight] per known slot, current slot first.
+      slots: >-
+        {%- set ns = namespace(s=[]) -%}
+        {%- if not price_gap -%}
+          {%- for p in prices[slot:] -%}
+            {%- set ts = price_start + (slot + loop.index0) * price_step -%}
+            {%- set prof = winter if (ts | timestamp_custom('%m', true) | int) in [1, 2, 3, 10, 11, 12] else summer -%}
+            {%- set ns.s = ns.s + [[p | float(0), prof[ts | timestamp_custom('%H', true) | int]]] -%}
+          {%- endfor -%}
+        {%- else -%}
+          {%- set prof = winter if now().month in [1, 2, 3, 10, 11, 12] else summer -%}
+          {%- set ns.s = [[fallback_market, prof[now().hour]]] -%}
+        {%- endif -%}
+        {{ ns.s }}
+      market: "{{ slots[0][0] }}"
+      dyn_exp: >-
+        {{ (market if is_state('input_boolean.hb_dynamic_export_vat', 'on') else market / 1.21)
+           - states('input_number.hb_dynamic_feed_in_fee') | float(0) }}
+      gas_market: >-
+        {{ states('sensor.energyzero_today_gas_current_hour_price') | float(state_attr(st, 'gas_market') | float(0)) }}
+      # Export per hour of the day: past hours today, later hours from yesterday.
+      prev_hour: "{{ state_attr(st, 'hour') | int(-1) }}"
+      hour_export: >-
+        {{ ((state_attr(st, 'hour_export') | float(0) if prev_hour == now().hour else 0) + d_exp) | round(5) }}
+      profile: >-
+        {%- set p = state_attr(st, 'profile') or [] -%}
+        {%- set p = p if p | count == 24 else [0] * 24 -%}
+        {%- if 0 <= prev_hour < 24 and prev_hour != now().hour -%}
+          {{ p[:prev_hour] + [state_attr(st, 'hour_export') | float(0) | round(4)] + p[prev_hour + 1:] }}
+        {%- else -%}
+          {{ p }}
+        {%- endif -%}
+      # Expected surplus over the price horizon, at most 24 h ahead.
+      surplus: >-
+        {%- set hours = [slots | count * price_step / 3600, 24] | min -%}
+        {%- set ns = namespace(s=profile[now().hour] | float(0) * (1 - now().minute / 60)) -%}
+        {%- for k in range(1, hours | round(0, 'ceil') | int) -%}
+          {%- set ns.s = ns.s + profile[(now().hour + k) % 24] | float(0) -%}
+        {%- endfor -%}
+        {{ ns.s | round(3) }}
+      load_kw: >-
+        {%- set m = state_attr(st, 'minutes') | float(0) -%}
+        {{ [state_attr(st, 'import_kwh') | float(0) / (m / 60), 0.1] | max | round(3) if m >= 1440 else 0.4 }}
+      sim: >-
+        {%- set slot_h = price_step / 3600 -%}
+        {%- set per_slot = [load_kw * slot_h, 0.000001] | max -%}
+        {%- set soc_prev = state_attr(st, 'soc') or {} -%}
+        {%- set ns = namespace(out={}) -%}
+        {%- for t in tariffs -%}
+          {%- set fixed = t.startswith('fixed') -%}
+          {%- set y29 = t.endswith('2029') -%}
+          {%- set f = namespace(p=[]) -%}
+          {%- for s in slots -%}
+            {%- set f.p = f.p + [(fix_imp if fixed else s[0] + add_dyn) + (grid_rate * s[1] if y29 else 0)] -%}
+          {%- endfor -%}
+          {%- set p_now = f.p[0] -%}
+          {%- set exp_p = fix_exp if fixed else dyn_exp -%}
+          {%- set soc0 = [[soc_prev.get(t, 0) | float(0), 0] | max, cap] | min -%}
+          {%- set charge = [d_exp, e_max, (cap - soc0) / eta] | min -%}
+          {%- set soc1 = soc0 + charge * eta -%}
+          {%- set desc = f.p | sort(reverse=true) -%}
+          {%- set n_d = [((soc1 + surplus * eta) * eta / per_slot) | round(0, 'ceil') | int, 1] | max -%}
+          {%- set g = namespace(e=0, allow=p_now >= desc[[n_d, desc | count] | min - 1] - 0.000001) -%}
+          {%- set room = cap - soc1 - surplus * eta -%}
+          {%- if room > 0.000001 and e_max - charge > 0.000001 -%}
+            {%- set n_c = [(room / (eta * power * slot_h)) | round(0, 'ceil') | int, 1] | max -%}
+            {%- set threshold = desc[-([n_c, desc | count] | min)] -%}
+            {%- set top = desc[:[(cap * eta / per_slot) | round(0, 'ceil') | int, 1] | max] -%}
+            {%- if p_now <= threshold + 0.000001 and (top | sum) / (top | count) * rt - p_now >= spread -%}
+              {%- set g.e = [e_max - charge, room / eta] | min -%}
+              {%- set g.allow = false -%}
+            {%- endif -%}
+          {%- endif -%}
+          {%- set soc2 = soc1 + g.e * eta -%}
+          {%- set dis = [d_imp, [e_max - charge - g.e, 0] | max, soc2 * eta] | min if g.allow else 0 -%}
+          {%- set b_imp = d_imp - dis + g.e + standby -%}
+          {%- set b_exp = d_exp - charge -%}
+          {%- set ns.out = dict(ns.out, **{t: {
+                'soc': (soc2 - dis / eta) | round(5), 'imp': b_imp | round(6), 'exp': b_exp | round(6),
+                'sc': charge | round(6), 'gc': g.e | round(6), 'dis': dis | round(6), 'price': p_now | round(5),
+                'none': (d_imp * p_now - d_exp * exp_p) | round(6),
+                'battery': (b_imp * p_now - b_exp * exp_p) | round(6)}}) -%}
+        {%- endfor -%}
+        {{ ns.out }}
+    actions:
+      - event: home_battery_tick
+        event_data:
+          ts: "{{ now_ts }}"
+          minutes: "{{ sim_minutes }}"
+          import: "{{ imp_now if imp_now >= 0 else state_attr(st, 'import') }}"
+          export: "{{ exp_now if exp_now >= 0 else state_attr(st, 'export') }}"
+          gas: "{{ gas_now if gas_now >= 0 else state_attr(st, 'gas') }}"
+          market: "{{ market }}"
+          gas_market: "{{ gas_market }}"
+          price_gap: "{{ price_gap }}"
+          d_imp: "{{ d_imp | round(6) }}"
+          d_exp: "{{ d_exp | round(6) }}"
+          d_gas: "{{ d_gas | round(6) }}"
+          sim: "{{ sim }}"
+          soc: >-
+            {%- set ns = namespace(o={}) -%}
+            {%- for t in tariffs -%}{%- set ns.o = dict(ns.o, **{t: sim[t].soc}) -%}{%- endfor -%}
+            {{ ns.o }}
+          gas_cost:
+            fixed: "{{ (d_gas * states('input_number.hb_gas_fixed_price') | float(0)) | round(6) }}"
+            dynamic: >-
+              {{ (d_gas * (gas_market + states('input_number.hb_gas_dynamic_markup') | float(0)
+                           + states('input_number.hb_gas_tax') | float(0))) | round(6) }}
+          neg:
+            kwh: "{{ d_exp if dyn_exp < 0 else 0 }}"
+            cost: "{{ (-d_exp * dyn_exp) | round(6) if dyn_exp < 0 else 0 }}"
+          hour: "{{ now().hour }}"
+          hour_export: "{{ hour_export }}"
+          profile: "{{ profile }}"
+          surplus: "{{ surplus }}"
+          load_kw: "{{ load_kw }}"

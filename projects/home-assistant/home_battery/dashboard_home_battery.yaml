@@ -1,0 +1,482 @@
+# Home Battery & Energy Contract Dashboard — complete raw configuration
+#
+# Setup: Settings -> Dashboards -> Add dashboard -> "New dashboard from scratch"
+#        name it e.g. "Energy analysis", open it -> Edit Dashboard -> 3-dot menu
+#        -> Raw configuration editor -> SELECT ALL, DELETE, paste this entire file.
+#
+# Needs packages/home_battery.yaml and the EnergyZero integration. The "Year
+# simulation" cards need the Energy Analyzer add-on (sensor.energy_analyzer_*);
+# until it has run they show a waiting message.
+#
+# Uses built-in cards only.
+
+views:
+  # ===========================================================================
+  - title: Energy
+    path: energy
+    icon: mdi:home-lightning-bolt
+    cards:
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.p1_meter_power
+            name: Grid (− = export)
+            unit: W
+            min: -5000
+            max: 5000
+            needle: true
+            severity:
+              green: -5000
+              yellow: 0
+              red: 2500
+          - type: gauge
+            entity: sensor.steca_inverter_ac_power
+            name: Solar
+            unit: W
+            min: 0
+            max: 5000
+          - type: gauge
+            entity: sensor.hb_house_power
+            name: House
+            unit: W
+            min: 0
+            max: 8000
+
+      - type: glance
+        title: Today (kWh)
+        columns: 4
+        entities:
+          - entity: sensor.hb_import_daily
+            name: Import
+          - entity: sensor.hb_export_daily
+            name: Export
+          - entity: sensor.hb_solar_daily
+            name: Solar
+          - entity: sensor.hb_house_consumption_daily
+            name: House
+
+      - type: statistics-graph
+        title: Energy per day (kWh)
+        chart_type: bar
+        period: day
+        days_to_show: 30
+        stat_types:
+          - change
+        entities:
+          - entity: sensor.p1_meter_energy_import
+            name: Import
+          - entity: sensor.p1_meter_energy_export
+            name: Export
+          - entity: sensor.hb_solar_energy
+            name: Solar
+          - entity: sensor.hb_house_energy
+            name: House
+
+      - type: statistics-graph
+        title: Where it goes (kWh per day)
+        chart_type: bar
+        period: day
+        days_to_show: 30
+        stat_types:
+          - change
+        entities:
+          - entity: sensor.hb_ev_charged_energy
+            name: EV (car side)
+          - entity: sensor.airco_masterbedroom_energy
+            name: Airco master
+          - entity: sensor.airco_slaapkamer_2_energy
+            name: Airco slaapkamer 2
+          - entity: sensor.hb_bathroom_energy
+            name: Bathroom heating
+
+      - type: statistics-graph
+        title: Gas per day (m³)
+        chart_type: bar
+        period: day
+        days_to_show: 30
+        stat_types:
+          - change
+        entities:
+          - entity: sensor.gas_meter_gas
+            name: Gas
+
+      - type: history-graph
+        title: Power (24 h)
+        hours_to_show: 24
+        entities:
+          - entity: sensor.p1_meter_power
+            name: Grid
+          - entity: sensor.steca_inverter_ac_power
+            name: Solar
+          - entity: sensor.hb_house_power
+            name: House
+
+  # ===========================================================================
+  - title: Prices
+    path: prices
+    icon: mdi:chart-bell-curve
+    cards:
+      - type: glance
+        title: Now
+        columns: 4
+        entities:
+          - entity: sensor.energyzero_today_energy_current_hour_price
+            name: Market
+          - entity: sensor.hb_price_dynamic_now
+            name: Dynamic all-in
+          - type: attribute
+            entity: sensor.hb_price_dynamic_now
+            attribute: export
+            name: Dynamic export
+          - entity: input_number.hb_fixed_price
+            name: Fixed all-in
+          - entity: sensor.hb_grid_weight_now
+            name: 2029 grid weight
+          - type: attribute
+            entity: sensor.hb_price_dynamic_now
+            attribute: grid_2029
+            name: 2029 grid €/kWh
+          - entity: sensor.energyzero_today_gas_current_hour_price
+            name: Gas market
+          - entity: sensor.hb_gas_price_dynamic_now
+            name: Gas dynamic all-in
+
+      - type: markdown
+        title: Dynamic price forecast (all-in, per hour)
+        content: |
+          {% set e = 'sensor.hb_electricity_prices' %}
+          {% set pl = state_attr(e, 'prices') or [] %}
+          {% set st = state_attr(e, 'start_ts') | float(0) %}
+          {% set step = state_attr(e, 'step_s') | float(900) %}
+          {% set add = states('input_number.hb_dynamic_markup') | float(0) + states('input_number.hb_energy_tax') | float(0) %}
+          {% set fixed = states('input_number.hb_fixed_price') | float(0) %}
+          {% set per_h = [(3600 / step) | int, 1] | max %}
+          {% set ns = namespace(rows=[]) %}
+          {% for h in range([((now().timestamp() - st) // 3600) | int, 0] | max, (pl | count) // per_h) %}
+            {% set c = pl[h * per_h:(h + 1) * per_h] %}
+            {% set ns.rows = ns.rows + [{'t': st + h * 3600, 'avg': (c | sum) / (c | count) + add, 'min': (c | min) + add, 'neg': (c | min) < 0}] %}
+          {% endfor %}
+          {% if ns.rows %}
+          {% set lo = ns.rows | map(attribute='avg') | min %}
+          {% set hi = ns.rows | map(attribute='avg') | max %}
+          {% set span = [hi - lo, 0.001] | max %}
+          Fixed all-in for comparison: **€ {{ '%.3f' | format(fixed) }}**.
+          {{ 'Tomorrow is included.' if state_attr(e, 'tomorrow_available') else 'Tomorrow follows at about 13:00.' }}
+
+          | Hour | € avg | € min | |
+          |---|---:|---:|---|
+          {% for r in ns.rows %}{% set n = ((r.avg - lo) / span * 16) | round(0) | int + 1 %}{% set col = 'green' if r.avg <= lo + span / 3 else 'orange' if r.avg <= lo + 2 * span / 3 else 'red' %}| {{ r.t | timestamp_custom('%a %H:00') }} | {{ '%.3f' | format(r.avg) }} | {{ '%.3f' | format(r.min) }}{{ ' ⚠' if r.neg else '' }} | <font color="{{ col }}">{{ '█' * n }}</font>{{ ' ◀ now' if loop.first and r.t <= now().timestamp() else '' }} |
+          {% endfor %}
+
+          ⚠ = negative market price in that hour (exporting costs money on a dynamic contract).
+          {% else %}
+          No prices yet. Install EnergyZero and wait for the next quarter hour.
+          {% endif %}
+
+      - type: history-graph
+        title: Dynamic all-in price (48 h)
+        hours_to_show: 48
+        entities:
+          - entity: sensor.hb_price_dynamic_now
+            name: Dynamic all-in
+          - entity: input_number.hb_fixed_price
+            name: Fixed all-in
+
+      - type: history-graph
+        title: Gas price (7 days)
+        hours_to_show: 168
+        entities:
+          - entity: sensor.hb_gas_price_dynamic_now
+            name: Dynamic all-in
+          - entity: input_number.hb_gas_fixed_price
+            name: Fixed all-in
+
+  # ===========================================================================
+  # Rolling 12 months, written every night by the Energy Analyzer add-on
+  # (statistics energy_analyzer:*, attributes of sensor.energy_analyzer_status).
+  - title: Price history
+    path: price-history
+    icon: mdi:chart-timeline-variant-shimmer
+    cards:
+      - type: statistics-graph
+        title: Electricity, all-in (€/kWh, weekly; band = cheapest/dearest hour)
+        chart_type: line
+        period: week
+        days_to_show: 365
+        stat_types:
+          - mean
+          - min
+          - max
+        entities:
+          - entity: energy_analyzer:electricity_dynamic
+            name: Dynamic
+          - entity: energy_analyzer:electricity_fixed
+            name: Fixed
+
+      - type: statistics-graph
+        title: Gas, all-in (€/m³, weekly)
+        chart_type: line
+        period: week
+        days_to_show: 365
+        stat_types:
+          - mean
+        entities:
+          - entity: energy_analyzer:gas_dynamic
+            name: Dynamic
+          - entity: energy_analyzer:gas_fixed
+            name: Fixed
+
+      - type: statistics-graph
+        title: Electricity, all-in (€/kWh, daily, 60 days)
+        chart_type: line
+        period: day
+        days_to_show: 60
+        stat_types:
+          - mean
+          - min
+          - max
+        entities:
+          - entity: energy_analyzer:electricity_dynamic
+            name: Dynamic
+          - entity: energy_analyzer:electricity_fixed
+            name: Fixed
+
+      - type: markdown
+        title: Dynamic vs fixed per month
+        content: |
+          {% set h = state_attr('sensor.energy_analyzer_status', 'price_history') %}
+          {% if h and h.months %}
+          {% set fixed, gas_fixed = h.fixed, h.gas_fixed %}
+          All-in prices incl. VAT and energy tax; fixed = your 2027 settings
+          (€ {{ fixed }}/kWh, € {{ gas_fixed }}/m³; export € {{ h.fixed_export }}/kWh).
+          *Your use* weighs every hour by what your P1 meter imported (or exported) in it.
+
+          | Month | Dynamic | Your use | Fixed | Δ your use | Export your use | Neg. h | Gas dyn |
+          |---|---:|---:|---:|---:|---:|---:|---:|
+          {% for m in h.months %}{% set u = m.dynamic_your_use %}| {{ m.month }} | {{ '%.3f' | format(m.dynamic) }} | {{ '%.3f' | format(u) if u is not none else '—' }} | {{ '%.3f' | format(fixed) }} | {{ ('<font color="' ~ ('green' if u < fixed else 'red') ~ '">' ~ '%+.3f' | format(u - fixed) ~ '</font>') if u is not none else '—' }} | {{ '%.3f' | format(m.export_your_use) if m.export_your_use is not none else '—' }} | {{ m.negative_hours }} | {{ '%.2f' | format(m.gas_dynamic) if m.gas_dynamic is not none else '—' }} |
+          {% endfor %}
+
+          {% set n = h.months | count %}
+          12-month average dynamic: **€ {{ '%.3f' | format((h.months | sum(attribute='dynamic')) / n) }}/kWh**
+          (cheaper than fixed in {{ h.months | selectattr('dynamic', 'lt', fixed) | list | count }} of {{ n }} months),
+          gas **€ {{ '%.2f' | format((h.months | selectattr('gas_dynamic') | sum(attribute='gas_dynamic')) / [h.months | selectattr('gas_dynamic') | list | count, 1] | max) }}/m³**.
+          Graphs: {{ 'up to date' if h.statistics == 'ok' else h.statistics }}.
+          {% else %}
+          Waiting for the Energy Analyzer add-on's next run.
+          {% endif %}
+
+  # ===========================================================================
+  - title: Battery & contract
+    path: battery
+    icon: mdi:home-battery
+    cards:
+      - type: markdown
+        title: Verdict
+        content: |
+          {% set y = 'sensor.energy_analyzer_status' %}
+          {% set use_year = is_state(y, 'ok') %}
+          {% set src = y if use_year else 'sensor.hb_live_projection' %}
+          {% set annual = state_attr(src, 'annual') %}
+          {% set bat = state_attr(src, 'battery') %}
+          {% set gas = state_attr(src, 'gas') %}
+          {% set life = states('input_number.hb_battery_lifetime') | float(10) %}
+          {% set label = {'fixed_2027': 'fixed', 'dynamic_2027': 'dynamic', 'fixed_2029': 'fixed', 'dynamic_2029': 'dynamic'} %}
+          {% if annual and bat %}
+          Based on **{{ 'the year simulation (' ~ state_attr(y, 'period_start') ~ ' – ' ~ state_attr(y, 'period_end') ~ ')' if use_year
+                        else 'live tracking (' ~ states('sensor.hb_tracking_days') ~ ' days, season-biased)' }}**.
+          {% if use_year and state_attr(y, 'measured_days') | int(0) < 330 %}
+          {% set est = state_attr(y, 'estimate') or {} %}
+
+          {% if est.status == 'ok' %}
+          ⓘ {{ state_attr(y, 'measured_days') }} days measured; the other {{ state_attr(y, 'days') | int - state_attr(y, 'measured_days') | int }} days
+          are **estimated** from the real weather and prices of those days (fit error ±{{ est.model.use_error_pct }} % per day on use,
+          ±{{ est.model.solar_error_pct }} % on solar). Estimates are replaced by measurements as they come in.
+          {% else %}
+          ⚠ Only {{ state_attr(y, 'measured_days') }} days of meter history, scaled to a year
+          (estimate: {{ est.status or 'off' }}). See *Price history* for the full 12 months of prices.
+          {% endif %}
+          {% endif %}
+          {% for yr in ['2027', '2029'] %}
+          {% set f, d = annual['fixed_' ~ yr], annual['dynamic_' ~ yr] %}
+          {% set opts = {'fixed, no battery': f['none'], 'fixed + battery': f.battery, 'dynamic, no battery': d['none'], 'dynamic + battery': d.battery} %}
+          {% set best = opts | dictsort(by='value') | first %}
+
+          ### {{ yr }}{{ ' (assumed time-dependent network tariff)' if yr == '2029' else '' }}
+          - Best: **{{ best[0] }}**, € {{ best[1] | int }}/yr.
+          - Dynamic instead of fixed, no battery: **{{ '%+d' | format(f['none'] - d['none']) }} €/yr** {{ 'saving' if f['none'] > d['none'] else 'extra cost' if f['none'] < d['none'] else '' }}.
+          {% for t in ['fixed_' ~ yr, 'dynamic_' ~ yr] %}{% set b = bat[t] %}
+          - Battery on {{ label[t] }}: saves € {{ b.saving }}/yr, payback **{{ (b.payback ~ ' yr') if b.payback else 'never' }}**
+            {{- ' ✅ within' if b.payback and b.payback <= life else ' ❌ beyond' }} the {{ life | int }}-year lifetime
+            (net € {{ (b.saving * life - states('input_number.hb_battery_investment') | float(0)) | round(0) | int }} over the lifetime, {{ b.cycles }} cycles/yr).
+          {% endfor %}
+          {% endfor %}
+          {% if gas %}
+
+          ### Gas
+          Dynamic instead of fixed: **{{ '%+d' | format(gas.fixed - gas.dynamic) }} €/yr** ({{ gas.m3 }} m³/yr).
+          {% endif %}
+          {% else %}
+          Waiting for data: the add-on's year simulation, or 7 days of live tracking.
+          {% endif %}
+
+      - type: markdown
+        title: Year simulation (Energy Analyzer add-on)
+        content: |
+          {% set y = 'sensor.energy_analyzer_status' %}
+          {% if is_state(y, 'ok') %}
+          {% set a = state_attr(y, 'annual') %}
+          {% set b = state_attr(y, 'battery') %}
+          {{ state_attr(y, 'days') }} days measured ({{ state_attr(y, 'period_start') }} – {{ state_attr(y, 'period_end') }}),
+          last run {{ (state_attr(y, 'last_run') or '')[:16] | replace('T', ' ') }} UTC. Costs per year incl. monthly fees.
+
+          | Contract | No battery | Battery | Saving | Payback | Grid charged |
+          |---|---:|---:|---:|---:|---:|
+          {% for t, name in [('fixed_2027', 'Fixed 2027'), ('dynamic_2027', 'Dynamic 2027'), ('fixed_2029', 'Fixed 2029'), ('dynamic_2029', 'Dynamic 2029')] %}| {{ name }} | € {{ a[t]['none'] }} | € {{ a[t].battery }} | € {{ b[t].saving }} | {{ (b[t].payback ~ ' yr') if b[t].payback else '—' }} | {{ b[t].grid_charge }} kWh |
+          {% endfor %}
+
+          Import/export without battery: {{ a.fixed_2027.import_none }} / {{ a.fixed_2027.export_none }} kWh per year.
+          Exported at a negative price: {{ state_attr(y, 'negative_export_kwh') }} kWh, costing € {{ state_attr(y, 'negative_export_cost') }} on a dynamic contract.
+          Gas: fixed € {{ state_attr(y, 'gas').fixed }}, dynamic € {{ state_attr(y, 'gas').dynamic }} per year.
+          {% for n in state_attr(y, 'notes') or [] %}
+          - {{ n }}
+          {% endfor %}
+          {% else %}
+          **{{ states(y) }}** {{ state_attr(y, 'detail') or '' }}
+
+          Install and start the Energy Analyzer add-on (see the README). It runs a few minutes after start and every night.
+          {% endif %}
+
+      - type: markdown
+        title: Battery size (year simulation, saving per year)
+        content: |
+          {% set y = 'sensor.energy_analyzer_status' %}
+          {% set sizes = state_attr(y, 'sizes') or [] %}
+          {% if sizes %}
+          Same product stacked: power and price scale with capacity.
+
+          | kWh | kW | Price | Fixed 27 | Dyn 27 | Fixed 29 | Dyn 29 |
+          |---:|---:|---:|---:|---:|---:|---:|
+          {% for s in sizes %}| {{ s.kwh }} | {{ s.kw }} | € {{ s.investment }} |{% for t in ['fixed_2027', 'dynamic_2027', 'fixed_2029', 'dynamic_2029'] %} € {{ s[t] }} ({{ (s[t ~ '_payback'] ~ ' yr') if s[t ~ '_payback'] else '—' }}) |{% endfor %}
+          {% endfor %}
+          {% else %}
+          Waiting for the year simulation.
+          {% endif %}
+
+      - type: markdown
+        title: Per month (year simulation, € excl. monthly fees)
+        content: |
+          {% set months = state_attr('sensor.energy_analyzer_status', 'months') or [] %}
+          {% if months %}
+          | Month | Data | Import | Export | Fixed 27 | +bat | Dyn 27 | +bat | Dyn 29 | +bat |
+          |---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+          {% for m in months %}| {{ m.month }} | {{ 'measured' if m.estimated == 0 else 'estimated' if m.estimated == 100 else m.estimated ~ ' % est.' }} | {{ m.import }} | {{ m.export }} | {{ m.fixed_2027_none }} | {{ m.fixed_2027_battery }} | {{ m.dynamic_2027_none }} | {{ m.dynamic_2027_battery }} | {{ m.dynamic_2029_none }} | {{ m.dynamic_2029_battery }} |
+          {% endfor %}
+          {% set est = state_attr('sensor.energy_analyzer_status', 'estimate') or {} %}
+          {% if est.status == 'ok' %}
+
+          Estimate model (fitted on {{ est.model.fit_days }} measured days): base {{ est.model.base_kwh_day }} kWh/day,
+          heating +{{ est.model.heating_kwh_per_degree_day }} kWh per degree-day below 16 °C,
+          cooling +{{ est.model.cooling_kwh_per_degree_day }} kWh per degree above 24 °C (daily max),
+          solar {{ est.model.solar_kwh_per_kwh_m2 }} kWh per kWh/m² ({{ est.site.kwp }} kWp, tilt {{ est.site.tilt }}°, azimuth {{ est.site.azimuth }}°),
+          gas {{ est.model.gas_base_m3_day }} m³/day + {{ est.model.gas_m3_per_degree_day }} m³ per degree-day.
+          {% endif %}
+          {% else %}
+          Waiting for the year simulation.
+          {% endif %}
+
+      - type: markdown
+        title: Live running totals (since tracking start)
+        content: |
+          {% set rows = [('Fixed 2027', 'fixed_2027'), ('Dynamic 2027', 'dynamic_2027'), ('Fixed 2029', 'fixed_2029'), ('Dynamic 2029', 'dynamic_2029')] %}
+          {{ states('sensor.hb_tracking_days') }} days since {{ states('input_datetime.hb_tracking_start')[:16] }}.
+          Energy costs only, without monthly fees.
+
+          | Contract | No battery | Battery | Saving | Battery in/out (solar+grid / out) |
+          |---|---:|---:|---:|---:|
+          {% for name, t in rows %}{% set n = states('sensor.hb_cost_' ~ t ~ '_no_battery') | float(0) %}{% set b = states('sensor.hb_cost_' ~ t ~ '_battery') | float(0) %}{% set a = states['sensor.hb_cost_' ~ t ~ '_battery'].attributes if states['sensor.hb_cost_' ~ t ~ '_battery'] else {} %}| {{ name }} | € {{ '%.2f' | format(n) }} | € {{ '%.2f' | format(b) }} | € {{ '%.2f' | format(n - b) }} | {{ '%.1f' | format(a.get('solar_charge_kwh', 0) | float(0)) }}+{{ '%.1f' | format(a.get('grid_charge_kwh', 0) | float(0)) }} / {{ '%.1f' | format(a.get('discharge_kwh', 0) | float(0)) }} kWh |
+          {% endfor %}
+
+          Import {{ '%.1f' | format(state_attr('sensor.hb_cost_fixed_2027_no_battery', 'import_kwh') | float(0)) }} kWh,
+          export {{ '%.1f' | format(state_attr('sensor.hb_cost_fixed_2027_no_battery', 'export_kwh') | float(0)) }} kWh,
+          {{ '%.1f' | format(states('sensor.hb_negative_price_export') | float(0)) }} kWh at a negative price.
+          Gas: fixed € {{ '%.2f' | format(states('sensor.hb_cost_gas_fixed') | float(0)) }},
+          dynamic € {{ '%.2f' | format(states('sensor.hb_cost_gas_dynamic') | float(0)) }}
+          ({{ '%.1f' | format(state_attr('sensor.hb_cost_gas_fixed', 'gas_m3') | float(0)) }} m³).
+          {% set gap = state_attr('sensor.hb_simulation_state', 'price_gap_minutes') | float(0) %}
+          {{ '⚠ ' ~ gap | int ~ ' minutes without a dynamic price (last price reused).' if gap > 0 else '' }}
+
+      - type: history-graph
+        title: Virtual battery charge (48 h)
+        hours_to_show: 48
+        entities:
+          - entity: sensor.hb_battery_soc_fixed_2027
+            name: Fixed 2027 (self-use)
+          - entity: sensor.hb_battery_soc_dynamic_2027
+            name: Dynamic 2027 (price-aware)
+          - entity: sensor.hb_battery_soc_dynamic_2029
+            name: Dynamic 2029
+
+      - type: statistics-graph
+        title: Electricity cost per day (€, live)
+        chart_type: bar
+        period: day
+        days_to_show: 30
+        stat_types:
+          - change
+        entities:
+          - entity: sensor.hb_cost_fixed_2027_no_battery
+            name: Fixed
+          - entity: sensor.hb_cost_fixed_2027_battery
+            name: Fixed + battery
+          - entity: sensor.hb_cost_dynamic_2027_no_battery
+            name: Dynamic
+          - entity: sensor.hb_cost_dynamic_2027_battery
+            name: Dynamic + battery
+
+      - type: entities
+        title: Battery settings
+        entities:
+          - entity: input_number.hb_battery_capacity
+          - entity: input_number.hb_battery_power
+          - entity: input_number.hb_battery_efficiency
+          - entity: input_number.hb_battery_standby
+          - entity: input_number.hb_battery_min_spread
+          - entity: input_number.hb_battery_investment
+          - entity: input_number.hb_battery_lifetime
+
+      - type: entities
+        title: Contract settings (2027 offers)
+        entities:
+          - type: section
+            label: Fixed
+          - entity: input_number.hb_fixed_price
+          - entity: input_number.hb_fixed_feed_in
+          - entity: input_number.hb_fixed_feed_in_cost
+          - entity: input_number.hb_fixed_monthly
+          - type: section
+            label: Dynamic
+          - entity: input_number.hb_dynamic_markup
+          - entity: input_number.hb_energy_tax
+          - entity: input_number.hb_dynamic_feed_in_fee
+          - entity: input_boolean.hb_dynamic_export_vat
+          - entity: input_number.hb_dynamic_monthly
+          - type: section
+            label: Gas
+          - entity: input_number.hb_gas_fixed_price
+          - entity: input_number.hb_gas_dynamic_markup
+          - entity: input_number.hb_gas_tax
+          - entity: input_number.hb_gas_fixed_monthly
+          - entity: input_number.hb_gas_dynamic_monthly
+          - type: section
+            label: 2029 network tariff (assumption)
+          - entity: input_number.hb_grid_rate
+          - entity: input_number.hb_grid_fixed_change
+          - entity: input_text.hb_grid_profile_winter
+          - entity: input_text.hb_grid_profile_summer
+          - type: section
+            label: Tracking
+          - entity: sensor.hb_tracking_days
+          - entity: input_datetime.hb_tracking_start
+          - entity: script.hb_reset_statistics
+          - entity: button.energy_analyzer_run
+            name: Run year simulation now

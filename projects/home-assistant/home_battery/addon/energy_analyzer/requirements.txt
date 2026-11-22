@@ -1,0 +1,3 @@
+paho-mqtt==2.2.0
+websockets==17.4
+tzdata
