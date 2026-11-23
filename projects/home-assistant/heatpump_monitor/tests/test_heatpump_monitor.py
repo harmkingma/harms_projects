@@ -1,4 +1,4 @@
-"""Behavioural tests for packages/heatpump_monitor.yaml.
+﻿"""Behavioural tests for packages/heatpump_monitor.yaml.
 
 The package runs in a real Home Assistant core instance. The P1P2MQTT bridge
 entities are plain states; the statistics sensors the learner reads are set
@@ -17,7 +17,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 from homeassistant.util import dt as dt_util
 from homeassistant.util.yaml import load_yaml_dict
-from pytest_homeassistant_custom_component.common import async_fire_time_changed
+from pytest_homeassistant_custom_component.common import async_fire_time_changed, async_mock_service
 
 PACKAGE = Path(__file__).resolve().parents[1] / "packages" / "heatpump_monitor.yaml"
 FS = "sensor.bridge0_fieldsettings_"
@@ -124,11 +124,11 @@ async def test_curve_change_starts_new_learning_and_keeps_previous(hass_hp, free
 
 
 async def test_cold_bin_too_cold_suggests_steeper_curve(hass_hp, freezer):
-    # 12 h each. At 0 °C the room is 1 K below target, at 8 °C it is on target.
+    # 12 h each. At 0 Â°C the room is 1 K below target, at 8 Â°C it is on target.
     await seed(hass_hp, [[0, 72, 0.0, 20.0, 29.5], [8, 72, 8.0, 21.0, 26.7]])
     state = hass_hp.states.get(SUGGEST)
     assert state.state == "Steeper curve"
-    # The fitted correction is +3 K at -10 °C, limited to +2 K per step.
+    # The fitted correction is +3 K at -10 Â°C, limited to +2 K per step.
     assert state.attributes["suggested_lwt_at_low_ambient"] == 35
     assert state.attributes["suggested_lwt_at_high_ambient"] == 26
     assert state.attributes["rows"][0]["correction"] == 1.4
@@ -151,3 +151,24 @@ async def test_bins_below_min_hours_only_collect(hass_hp, freezer):
         "input_number", "set_value", {"entity_id": "input_number.hp_curve_min_hours", "value": 4}, blocking=True)
     await pump(hass_hp)
     assert hass_hp.states.get(SUGGEST).state == "Raise curve"
+
+
+async def test_control_off_alert_ignores_bridge_outage(hass_hp, freezer):
+    notes = async_mock_service(hass_hp, "persistent_notification", "create")
+    for switch in ("control_function", "counter_request_function"):
+        hass_hp.states.async_set(f"switch.bridge0_bridge_{switch}", "on")
+    config = await hass_hp.async_add_executor_job(load_yaml_dict, str(PACKAGE))
+    assert await async_setup_component(hass_hp, "automation", {"automation": config["automation"]})
+    await pump(hass_hp)
+    assert hass_hp.states.get("automation.heat_pump_monitor_alerts").state == "on"
+    await hass_hp.services.async_call("input_boolean", "turn_on", {"entity_id": "input_boolean.hp_alerts_enabled"}, blocking=True)
+
+    hass_hp.states.async_set("switch.bridge0_bridge_control_function", "unavailable")
+    await pump(hass_hp)
+    await tick(hass_hp, freezer)
+    assert notes == []
+
+    hass_hp.states.async_set("switch.bridge0_bridge_control_function", "off")
+    await pump(hass_hp)
+    await tick(hass_hp, freezer)
+    assert [n.data["notification_id"] for n in notes] == ["hp_bridge_control_off"]

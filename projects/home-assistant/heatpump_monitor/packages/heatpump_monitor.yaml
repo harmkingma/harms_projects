@@ -676,7 +676,6 @@ automation:
         entity_id:
           - switch.bridge0_bridge_control_function
           - switch.bridge0_bridge_counter_request_function
-        to: ~
         not_to:
           - unavailable
           - unknown
