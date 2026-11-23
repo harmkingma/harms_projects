@@ -1,0 +1,763 @@
+# =============================================================================
+# Heat Pump Monitor Package - Daikin Altherma R hybrid via the P1P2MQTT bridge
+# =============================================================================
+# Read-only monitor. It never writes to the Daikin: the controls (LWT offset,
+# Altherma on/off) are only shown on the dashboard for manual use.
+#
+# Requires Home Assistant 2024.10+ and the P1P2MQTT bridge (bridge name
+# "bridge0") with Control_Function ON, so the field settings - including the
+# weather-dependent curve - are published, and Counter_Request_Function ON, so
+# the Daikin kWh, hour and start counters update every minute.
+#
+# WEATHER-DEPENDENT CURVE (main zone, heating)
+#   [1-00] low ambient temp   [1-02] LWT at low ambient
+#   [1-01] high ambient temp  [1-03] LWT at high ambient
+# Between the two ambient points the LWT setpoint is linear; outside them it is
+# flat. Daikin feeds the curve with the outside temperature averaged over
+# [1-0A] (1 = 12 h), so this package uses a 12 h outside mean as well.
+#
+# CURVE LEARNING
+# Every 10 minutes, while the system heats in weather-dependent mode without
+# an LWT offset and the room thermostat is not limiting, the room temperature
+# is recorded in 2 K bins of the 12 h outside mean. Each bin is a running mean
+# that forgets older data after about 3 days of samples. When the curve
+# settings change, the learned bins move to "previous_bins" and learning starts
+# again, so the dashboard shows the effect of a change.
+# sensor.hp_curve_suggestion turns the room deviation from the target into a
+# suggested curve change. Model: in steady state a floor heated room follows
+#   dT_room = dT_water * (T_room - T_out) / (T_water - T_out)
+# with T_water approximated as curve LWT - [9-09]/2. The corrections of all
+# bins are fitted with a line, evaluated at [1-00] and [1-01], limited to
+# +/-2 K per step, kept within [9-01]..[9-00] and rounded to whole degrees
+# (the Daikin resolution).
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Settings
+# -----------------------------------------------------------------------------
+input_boolean:
+  hp_initialised:
+    name: HP Monitor Initialised
+    icon: mdi:check-decagram
+
+  hp_alerts_enabled:
+    name: HP Alerts Enabled
+    icon: mdi:bell-ring
+
+input_number:
+  hp_room_target:
+    name: HP Room Target Temperature
+    min: 16
+    max: 25
+    step: 0.1
+    unit_of_measurement: "°C"
+    mode: box
+    icon: mdi:home-thermometer
+
+  hp_curve_min_hours:
+    name: HP Curve Min. Hours per Bin
+    min: 2
+    max: 72
+    step: 1
+    unit_of_measurement: h
+    mode: box
+    icon: mdi:timer-sand
+
+# -----------------------------------------------------------------------------
+# Scripts
+# -----------------------------------------------------------------------------
+script:
+  hp_curve_reset:
+    alias: "Heat Pump: reset curve learning"
+    icon: mdi:restart
+    mode: single
+    sequence:
+      - event: hp_curve_command
+        event_data:
+          command: reset
+
+# -----------------------------------------------------------------------------
+# Live values
+# -----------------------------------------------------------------------------
+template:
+  - sensor:
+      - name: HP Water Delta T
+        unique_id: hp_water_delta_t
+        unit_of_measurement: K
+        state_class: measurement
+        icon: mdi:delta
+        availability: >
+          {{ has_value('sensor.bridge0_sensors_temperature_r2t_leaving_water')
+             and has_value('sensor.bridge0_sensors_temperature_r4t_return_water') }}
+        state: >
+          {{ (states('sensor.bridge0_sensors_temperature_r2t_leaving_water') | float
+              - states('sensor.bridge0_sensors_temperature_r4t_return_water') | float) | round(1) }}
+
+      - name: HP Heat Output Heat Pump
+        unique_id: hp_heat_output_heat_pump
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:heat-pump
+        availability: "{{ has_value('sensor.bridge0_power_production_heatpump') }}"
+        state: "{{ [states('sensor.bridge0_power_production_heatpump') | float(0), 0] | max | round(0) }}"
+
+      # The bridge reports gas boiler heat as flow x (R2T - R1T), which is a
+      # few tens of watts of sensor noise while only the heat pump runs.
+      - name: HP Heat Output Gas Boiler
+        unique_id: hp_heat_output_gas_boiler
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:fire
+        availability: "{{ has_value('sensor.bridge0_power_production_gasboiler') }}"
+        state: >
+          {{ [states('sensor.bridge0_power_production_gasboiler') | float(0), 0] | max | round(0)
+             if is_state('binary_sensor.bridge0_mode_gasboiler_active', 'on') else 0 }}
+
+      - name: HP Heat Output Total
+        unique_id: hp_heat_output_total
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:radiator
+        availability: >
+          {{ has_value('sensor.hp_heat_output_heat_pump') and has_value('sensor.hp_heat_output_gas_boiler') }}
+        state: >
+          {{ (states('sensor.hp_heat_output_heat_pump') | float
+              + states('sensor.hp_heat_output_gas_boiler') | float) | round(0) }}
+
+      # Consumption_Heatpump is the bridge's estimate (inverter primary current
+      # x 230 V), not a metered value.
+      - name: HP Electrical Power Estimate
+        unique_id: hp_electrical_power_estimate
+        unit_of_measurement: W
+        device_class: power
+        state_class: measurement
+        icon: mdi:flash
+        availability: "{{ has_value('sensor.bridge0_power_consumption_heatpump') }}"
+        state: "{{ [states('sensor.bridge0_power_consumption_heatpump') | float(0), 0] | max | round(0) }}"
+
+      - name: HP COP Now
+        unique_id: hp_cop_now
+        state_class: measurement
+        icon: mdi:gauge
+        availability: >
+          {{ is_state('binary_sensor.bridge0_mode_compressor', 'on')
+             and states('sensor.bridge0_power_consumption_heatpump') | float(0) >= 100
+             and has_value('sensor.bridge0_cop_cop_realtime') }}
+        state: "{{ states('sensor.bridge0_cop_cop_realtime') | float | round(2) }}"
+
+      - name: HP Room Deviation
+        unique_id: hp_room_deviation
+        unit_of_measurement: K
+        state_class: measurement
+        icon: mdi:thermometer-alert
+        availability: "{{ has_value('sensor.bridge0_sensors_temperature_room') }}"
+        state: >
+          {{ (states('sensor.bridge0_sensors_temperature_room') | float
+              - states('input_number.hp_room_target') | float(21)) | round(2) }}
+
+      - name: HP Indoor Outdoor Difference
+        unique_id: hp_indoor_outdoor_difference
+        unit_of_measurement: K
+        state_class: measurement
+        icon: mdi:home-thermometer-outline
+        availability: >
+          {{ has_value('sensor.bridge0_sensors_temperature_room')
+             and has_value('sensor.bridge0_sensors_temperature_outside') }}
+        state: >
+          {{ (states('sensor.bridge0_sensors_temperature_room') | float
+              - states('sensor.bridge0_sensors_temperature_outside') | float) | round(1) }}
+
+      # The LWT the curve asks for at the 12 h outside mean. It should match
+      # the Daikin LWT setpoint minus the LWT offset; the attributes hold the
+      # curve settings for the dashboard.
+      - name: HP Curve LWT
+        unique_id: hp_curve_lwt
+        unit_of_measurement: "°C"
+        device_class: temperature
+        state_class: measurement
+        icon: mdi:chart-line
+        availability: >
+          {{ [states('sensor.bridge0_fieldsettings_1_00_a3113_lwt_heating_main_wd_curve_low_amb'),
+              states('sensor.bridge0_fieldsettings_1_01_a3113_lwt_heating_main_wd_curve_high_amb'),
+              states('sensor.bridge0_fieldsettings_1_02_a3113_lwt_heating_main_wd_curve_low_amb_lwt'),
+              states('sensor.bridge0_fieldsettings_1_03_a3113_lwt_heating_main_wd_curve_high_amb_lwt'),
+              states('sensor.hp_outside_temperature_mean_12h')] | select('is_number') | list | count == 5 }}
+        state: >
+          {%- set lo = states('sensor.bridge0_fieldsettings_1_00_a3113_lwt_heating_main_wd_curve_low_amb') | float -%}
+          {%- set hi = states('sensor.bridge0_fieldsettings_1_01_a3113_lwt_heating_main_wd_curve_high_amb') | float -%}
+          {%- set llo = states('sensor.bridge0_fieldsettings_1_02_a3113_lwt_heating_main_wd_curve_low_amb_lwt') | float -%}
+          {%- set lhi = states('sensor.bridge0_fieldsettings_1_03_a3113_lwt_heating_main_wd_curve_high_amb_lwt') | float -%}
+          {%- set t = [[states('sensor.hp_outside_temperature_mean_12h') | float, lo] | max, hi] | min -%}
+          {{ (lhi + (llo - lhi) * (hi - t) / (hi - lo)) | round(1) if hi > lo else lhi }}
+        attributes:
+          low_ambient: "{{ states('sensor.bridge0_fieldsettings_1_00_a3113_lwt_heating_main_wd_curve_low_amb') | float(none) }}"
+          high_ambient: "{{ states('sensor.bridge0_fieldsettings_1_01_a3113_lwt_heating_main_wd_curve_high_amb') | float(none) }}"
+          lwt_at_low_ambient: "{{ states('sensor.bridge0_fieldsettings_1_02_a3113_lwt_heating_main_wd_curve_low_amb_lwt') | float(none) }}"
+          lwt_at_high_ambient: "{{ states('sensor.bridge0_fieldsettings_1_03_a3113_lwt_heating_main_wd_curve_high_amb_lwt') | float(none) }}"
+
+      # Heat the house needed per kelvin of indoor-outdoor difference over the
+      # last 24 h. Rises on cold, windy days and falls with sun and internal
+      # gains; useful to compare days.
+      - name: HP Heat Loss Coefficient
+        unique_id: hp_heat_loss_coefficient
+        unit_of_measurement: W/K
+        state_class: measurement
+        icon: mdi:home-export-outline
+        availability: >
+          {{ state_attr('sensor.hp_heat_energy_24h', 'age_coverage_ratio') | float(0) >= 0.9
+             and has_value('sensor.hp_heat_energy_24h')
+             and states('sensor.hp_room_temperature_mean_24h') | float(0)
+                 - states('sensor.hp_outside_temperature_mean_24h') | float(99) >= 3 }}
+        state: >
+          {{ (states('sensor.hp_heat_energy_24h') | float * 1000 / 24
+              / (states('sensor.hp_room_temperature_mean_24h') | float
+                 - states('sensor.hp_outside_temperature_mean_24h') | float)) | round(0) }}
+
+      - name: HP COP Today
+        unique_id: hp_cop_today
+        state_class: measurement
+        icon: mdi:calendar-today
+        availability: "{{ states('sensor.hp_daikin_electricity_daily') | float(0) >= 2 }}"
+        state: >
+          {{ (states('sensor.hp_daikin_heat_daily') | float(0)
+              / states('sensor.hp_daikin_electricity_daily') | float) | round(2) }}
+
+      - name: HP COP Yesterday
+        unique_id: hp_cop_yesterday
+        icon: mdi:calendar-arrow-left
+        availability: "{{ state_attr('sensor.hp_daikin_electricity_daily', 'last_period') | float(0) >= 2 }}"
+        state: >
+          {{ (state_attr('sensor.hp_daikin_heat_daily', 'last_period') | float(0)
+              / state_attr('sensor.hp_daikin_electricity_daily', 'last_period') | float) | round(2) }}
+
+      - name: HP COP This Month
+        unique_id: hp_cop_this_month
+        icon: mdi:calendar-month
+        availability: "{{ states('sensor.hp_daikin_electricity_monthly') | float(0) >= 5 }}"
+        state: >
+          {{ (states('sensor.hp_daikin_heat_monthly') | float(0)
+              / states('sensor.hp_daikin_electricity_monthly') | float) | round(2) }}
+
+      - name: HP COP Lifetime
+        unique_id: hp_cop_lifetime
+        icon: mdi:infinity
+        availability: "{{ states('sensor.bridge0_meters_electricity_consumed_total') | float(0) > 0 }}"
+        state: >
+          {{ (states('sensor.bridge0_meters_energy_produced_compressor_heating') | float(0)
+              / states('sensor.bridge0_meters_electricity_consumed_total') | float) | round(2) }}
+
+      # Same-day COP from the bridge's live heat and power estimates: finer
+      # resolution than the whole-kWh Daikin counters, but less accurate.
+      - name: HP COP Today Estimate
+        unique_id: hp_cop_today_estimate
+        state_class: measurement
+        icon: mdi:calendar-today-outline
+        availability: "{{ states('sensor.hp_electricity_estimate_daily') | float(0) >= 0.5 }}"
+        state: >
+          {{ (states('sensor.hp_heat_pump_heat_daily') | float(0)
+              / states('sensor.hp_electricity_estimate_daily') | float) | round(2) }}
+
+      - name: HP Average Compressor Run Today
+        unique_id: hp_average_compressor_run_today
+        unit_of_measurement: min
+        icon: mdi:timer-outline
+        availability: "{{ states('sensor.hp_compressor_starts_daily') | float(0) >= 1 }}"
+        state: >
+          {{ (states('sensor.hp_compressor_runtime_today') | float(0) * 60
+              / states('sensor.hp_compressor_starts_daily') | float) | round(0) }}
+
+  # Curve learner. The state is the number of sample hours, always numeric, so
+  # the attributes are restored after a restart. Do not rename
+  # sensor.hp_curve_learning: the template reads its own previous attributes.
+  # bins: [lower bin edge, samples, mean outside 12 h, mean room, mean Daikin LWT setpoint]
+  - triggers:
+      - trigger: time_pattern
+        id: tick
+        minutes: "/10"
+      - trigger: event
+        id: command
+        event_type: hp_curve_command
+    actions:
+      - variables:
+          learn: >-
+            {%- set me = 'sensor.hp_curve_learning' -%}
+            {%- set cap = 432 -%}
+            {%- set prev = state_attr(me, 'bins') -%}
+            {%- set ns = namespace(bins=prev if prev is list else [],
+                  prev_bins=state_attr(me, 'previous_bins') or [], prev_curve=state_attr(me, 'previous_curve') or '',
+                  curve=state_attr(me, 'curve') or '', since=state_attr(me, 'since') or now().isoformat(),
+                  note=state_attr(me, 'last_event') or '', out=[], found=false) -%}
+            {%- set vals = [states('sensor.bridge0_fieldsettings_1_00_a3113_lwt_heating_main_wd_curve_low_amb'),
+                            states('sensor.bridge0_fieldsettings_1_01_a3113_lwt_heating_main_wd_curve_high_amb'),
+                            states('sensor.bridge0_fieldsettings_1_02_a3113_lwt_heating_main_wd_curve_low_amb_lwt'),
+                            states('sensor.bridge0_fieldsettings_1_03_a3113_lwt_heating_main_wd_curve_high_amb_lwt')] -%}
+            {%- set curve = (vals | map('float') | map('int') | join('/')) if vals | select('is_number') | list | count == 4 else '' -%}
+            {%- set cmd = trigger.event.data.command | default('') if trigger.id == 'command' else '' -%}
+            {%- if cmd == 'reset' or (curve and ns.curve and curve != ns.curve) -%}
+              {%- if ns.bins | count > 0 -%}
+                {%- set ns.prev_bins = ns.bins -%}
+                {%- set ns.prev_curve = ns.curve -%}
+              {%- endif -%}
+              {%- set ns.bins = [] -%}
+              {%- set ns.since = now().isoformat() -%}
+              {%- set ns.note = 'reset by user' if cmd == 'reset' else 'curve changed from ' ~ ns.curve ~ ' to ' ~ curve -%}
+            {%- endif -%}
+            {%- if curve -%}
+              {%- set ns.curve = curve -%}
+            {%- endif -%}
+            {%- if trigger.id == 'tick' -%}
+              {%- set t_out = states('sensor.hp_outside_temperature_mean_12h') | float(none) -%}
+              {%- set room = states('sensor.bridge0_sensors_temperature_room') | float(none) -%}
+              {%- set sp = states('sensor.bridge0_lwt_lwt_setpoint') | float(none) -%}
+              {%- set room_sp = states('sensor.bridge0_room_room_heating_setpoint') | float(99) -%}
+              {%- if not curve -%}
+                {%- set ns.note = 'waiting: curve settings unavailable' -%}
+              {%- elif not is_state('switch.bridge0_mode_altherma_on', 'on') -%}
+                {%- set ns.note = 'paused: heating off' -%}
+              {%- elif states('select.bridge0_mode_program_wd_abs') not in ['WD', 'WD+prog'] -%}
+                {%- set ns.note = 'paused: not in weather-dependent mode' -%}
+              {%- elif is_state('select.bridge0_mode_heating_cooling_auto', 'Cooling') -%}
+                {%- set ns.note = 'paused: cooling mode' -%}
+              {%- elif states('sensor.bridge0_lwt_deviation_heating') | float(0) != 0 -%}
+                {%- set ns.note = 'paused: LWT offset active' -%}
+              {%- elif t_out is none or room is none or sp is none -%}
+                {%- set ns.note = 'waiting: no temperature data' -%}
+              {%- elif room >= room_sp - 0.3 -%}
+                {%- set ns.note = 'paused: room thermostat setpoint reached' -%}
+              {%- else -%}
+                {%- set edge = ((t_out / 2) | round(0, 'floor') * 2) | int -%}
+                {%- for b in ns.bins -%}
+                  {%- if b[0] == edge -%}
+                    {%- set n = b[1] + 1 -%}
+                    {%- set w = 1 / ([n, cap] | min) -%}
+                    {#- 5 decimals: with weights down to 1/432, 2 decimals would freeze the means. -#}
+                    {%- set ns.out = ns.out + [[edge, n, (b[2] + w * (t_out - b[2])) | round(5),
+                          (b[3] + w * (room - b[3])) | round(5), (b[4] + w * (sp - b[4])) | round(5)]] -%}
+                    {%- set ns.found = true -%}
+                  {%- else -%}
+                    {%- set ns.out = ns.out + [b] -%}
+                  {%- endif -%}
+                {%- endfor -%}
+                {%- if not ns.found -%}
+                  {%- set ns.out = ns.out + [[edge, 1, t_out | round(2), room | round(2), sp | round(2)]] -%}
+                {%- endif -%}
+                {%- set ns.bins = ns.out | sort -%}
+                {%- set ns.note = 'sample: outside ' ~ t_out | round(1) ~ ' °C, room ' ~ room | round(1) ~ ' °C' -%}
+              {%- endif -%}
+            {%- endif -%}
+            {{- {'bins': ns.bins, 'prev_bins': ns.prev_bins, 'prev_curve': ns.prev_curve, 'curve': ns.curve,
+                 'since': ns.since, 'note': ns.note,
+                 'hours': ((ns.bins | map(attribute=1) | sum) / 6) | round(1)} -}}
+    sensor:
+      - name: HP Curve Learning
+        unique_id: hp_curve_learning
+        icon: mdi:school-outline
+        unit_of_measurement: h
+        state: "{{ learn.hours }}"
+        attributes:
+          bins: "{{ learn.bins }}"
+          curve: "{{ learn.curve }}"
+          since: "{{ learn.since }}"
+          previous_bins: "{{ learn.prev_bins }}"
+          previous_curve: "{{ learn.prev_curve }}"
+          last_event: "{{ learn.note }}"
+
+  # Curve suggestion from the learned bins, see the header for the model.
+  # rows: one entry per bin for the dashboard; correction is empty until the
+  # bin has "Min. Hours per Bin" of data.
+  - triggers:
+      - trigger: state
+        entity_id: sensor.hp_curve_learning
+      - trigger: state
+        entity_id:
+          - input_number.hp_room_target
+          - input_number.hp_curve_min_hours
+          - sensor.bridge0_fieldsettings_1_00_a3113_lwt_heating_main_wd_curve_low_amb
+          - sensor.bridge0_fieldsettings_1_01_a3113_lwt_heating_main_wd_curve_high_amb
+          - sensor.bridge0_fieldsettings_1_02_a3113_lwt_heating_main_wd_curve_low_amb_lwt
+          - sensor.bridge0_fieldsettings_1_03_a3113_lwt_heating_main_wd_curve_high_amb_lwt
+        to: ~
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: event_template_reloaded
+    actions:
+      - variables:
+          suggestion: >-
+            {%- set vals = [states('sensor.bridge0_fieldsettings_1_00_a3113_lwt_heating_main_wd_curve_low_amb'),
+                            states('sensor.bridge0_fieldsettings_1_01_a3113_lwt_heating_main_wd_curve_high_amb'),
+                            states('sensor.bridge0_fieldsettings_1_02_a3113_lwt_heating_main_wd_curve_low_amb_lwt'),
+                            states('sensor.bridge0_fieldsettings_1_03_a3113_lwt_heating_main_wd_curve_high_amb_lwt')] -%}
+            {%- set lo, hi, llo, lhi = vals | map('float', 0) | list -%}
+            {%- set half_dt = states('sensor.bridge0_fieldsettings_9_09_delta_t') | float(5) / 2 -%}
+            {%- set lwt_min = states('sensor.bridge0_fieldsettings_9_01_a31121_temp_heating_main_min') | float(25) -%}
+            {%- set lwt_max = states('sensor.bridge0_fieldsettings_9_00_a31122_temp_heating_main_max') | float(55) -%}
+            {%- set target = states('input_number.hp_room_target') | float(21) -%}
+            {%- set min_h = states('input_number.hp_curve_min_hours') | float(12) -%}
+            {%- set bins = state_attr('sensor.hp_curve_learning', 'bins') -%}
+            {%- set ns = namespace(w=0, wx=0, wy=0, wxx=0, wxy=0, wd=0, xmin=99, xmax=-99, rows=[]) -%}
+            {%- if vals | select('is_number') | list | count < 4 or hi <= lo -%}
+              {{- {'state': 'Curve settings unavailable', 'new_low': none, 'new_high': none, 'd_low': 0,
+                   'd_high': 0, 'mean_dev': none, 'hours': 0, 'rows': []} -}}
+            {%- else -%}
+              {%- for b in (bins if bins is list else []) -%}
+                {%- set h = b[1] / 6 -%}
+                {%- set t = [[b[2], lo] | max, hi] | min -%}
+                {%- set curve = lhi + (llo - lhi) * (hi - t) / (hi - lo) -%}
+                {%- set tw = curve - half_dt -%}
+                {%- set dev = b[3] - target -%}
+                {%- set ok = h >= min_h and b[3] - b[2] >= 3 and tw > b[3] -%}
+                {%- set corr = -dev * (tw - b[2]) / (b[3] - b[2]) if ok else none -%}
+                {%- set ns.rows = ns.rows + [{'bin': b[0], 'outside': b[2] | round(2), 'hours': h | round(1),
+                      'room': b[3] | round(2), 'deviation': dev | round(2), 'curve_lwt': curve | round(1),
+                      'daikin_lwt': b[4] | round(1), 'correction': corr | round(1) if ok else none}] -%}
+                {%- if ok -%}
+                  {%- set ns.w = ns.w + h -%}
+                  {%- set ns.wx = ns.wx + h * b[2] -%}
+                  {%- set ns.wy = ns.wy + h * corr -%}
+                  {%- set ns.wxx = ns.wxx + h * b[2] * b[2] -%}
+                  {%- set ns.wxy = ns.wxy + h * b[2] * corr -%}
+                  {%- set ns.wd = ns.wd + h * dev -%}
+                  {%- set ns.xmin = [ns.xmin, b[2]] | min -%}
+                  {%- set ns.xmax = [ns.xmax, b[2]] | max -%}
+                {%- endif -%}
+              {%- endfor -%}
+              {%- if ns.w > 0 -%}
+                {%- set xm = ns.wx / ns.w -%}
+                {%- set ym = ns.wy / ns.w -%}
+                {%- set sxx = ns.wxx / ns.w - xm * xm -%}
+                {#- A tilt needs data spread over at least 4 K; otherwise shift the whole curve. -#}
+                {%- set slope = (ns.wxy / ns.w - xm * ym) / sxx if ns.xmax - ns.xmin >= 4 and sxx > 0.01 else 0 -%}
+                {%- set new_low = [[llo + [[(ym + slope * (lo - xm)) | round(0), -2] | max, 2] | min, lwt_min] | max, lwt_max] | min | int -%}
+                {%- set new_high = [[lhi + [[(ym + slope * (hi - xm)) | round(0), -2] | max, 2] | min, lwt_min] | max, lwt_max] | min | int -%}
+                {%- set d_low = new_low - llo | int -%}
+                {%- set d_high = new_high - lhi | int -%}
+                {%- if d_low == 0 and d_high == 0 -%}
+                  {%- set state = 'Curve OK' -%}
+                {%- elif d_low == d_high -%}
+                  {%- set state = 'Raise curve' if d_low > 0 else 'Lower curve' -%}
+                {%- else -%}
+                  {%- set state = 'Steeper curve' if d_low > d_high else 'Flatter curve' -%}
+                {%- endif -%}
+                {{- {'state': state, 'new_low': new_low, 'new_high': new_high, 'd_low': d_low, 'd_high': d_high,
+                     'mean_dev': (ns.wd / ns.w) | round(2), 'hours': ns.w | round(1), 'rows': ns.rows} -}}
+              {%- else -%}
+                {{- {'state': 'Collecting data', 'new_low': llo | int, 'new_high': lhi | int, 'd_low': 0,
+                     'd_high': 0, 'mean_dev': none, 'hours': 0, 'rows': ns.rows} -}}
+              {%- endif -%}
+            {%- endif -%}
+    sensor:
+      - name: HP Curve Suggestion
+        unique_id: hp_curve_suggestion
+        icon: mdi:chart-bell-curve-cumulative
+        state: "{{ suggestion.state }}"
+        attributes:
+          suggested_lwt_at_low_ambient: "{{ suggestion.new_low }}"
+          suggested_lwt_at_high_ambient: "{{ suggestion.new_high }}"
+          change_at_low_ambient: "{{ suggestion.d_low }}"
+          change_at_high_ambient: "{{ suggestion.d_high }}"
+          mean_room_deviation: "{{ suggestion.mean_dev }}"
+          hours_used: "{{ suggestion.hours }}"
+          rows: "{{ suggestion.rows }}"
+
+# -----------------------------------------------------------------------------
+# Rolling statistics, energy and counters
+# -----------------------------------------------------------------------------
+sensor:
+  # Time-weighted, like the Daikin averaging; matches [1-0A] = 1 (12 h).
+  - platform: statistics
+    name: HP Outside Temperature Mean 12h
+    unique_id: hp_outside_temperature_mean_12h
+    entity_id: sensor.bridge0_sensors_temperature_outside
+    state_characteristic: average_linear
+    max_age:
+      hours: 12
+
+  - platform: statistics
+    name: HP Outside Temperature Mean 24h
+    unique_id: hp_outside_temperature_mean_24h
+    entity_id: sensor.bridge0_sensors_temperature_outside
+    state_characteristic: average_linear
+    max_age:
+      hours: 24
+
+  - platform: statistics
+    name: HP Room Temperature Mean 24h
+    unique_id: hp_room_temperature_mean_24h
+    entity_id: sensor.bridge0_sensors_temperature_room
+    state_characteristic: average_linear
+    max_age:
+      hours: 24
+
+  - platform: statistics
+    name: HP Heat Energy 24h
+    unique_id: hp_heat_energy_24h
+    entity_id: sensor.hp_heat_energy_total
+    state_characteristic: change
+    max_age:
+      hours: 24
+
+  - platform: integration
+    name: HP Heat Energy Total
+    unique_id: hp_heat_energy_total
+    source: sensor.hp_heat_output_total
+    method: left
+    unit_prefix: k
+    round: 3
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    name: HP Heat Energy Heat Pump
+    unique_id: hp_heat_energy_heat_pump
+    source: sensor.hp_heat_output_heat_pump
+    method: left
+    unit_prefix: k
+    round: 3
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    name: HP Heat Energy Gas Boiler
+    unique_id: hp_heat_energy_gas_boiler
+    source: sensor.hp_heat_output_gas_boiler
+    method: left
+    unit_prefix: k
+    round: 3
+    max_sub_interval:
+      minutes: 5
+
+  - platform: integration
+    name: HP Electricity Estimate Total
+    unique_id: hp_electricity_estimate_total
+    source: sensor.hp_electrical_power_estimate
+    method: left
+    unit_prefix: k
+    round: 3
+    max_sub_interval:
+      minutes: 5
+
+  - platform: history_stats
+    name: HP Compressor Runtime Today
+    unique_id: hp_compressor_runtime_today
+    entity_id: binary_sensor.bridge0_mode_compressor
+    state: "on"
+    type: time
+    start: "{{ today_at() }}"
+    end: "{{ now() }}"
+
+  - platform: history_stats
+    name: HP Gas Boiler Runtime Today
+    unique_id: hp_gas_boiler_runtime_today
+    entity_id: binary_sensor.bridge0_mode_gasboiler_active
+    state: "on"
+    type: time
+    start: "{{ today_at() }}"
+    end: "{{ now() }}"
+
+  - platform: history_stats
+    name: HP Defrosts Today
+    unique_id: hp_defrosts_today
+    entity_id: binary_sensor.bridge0_mode_defrost_active
+    state: "on"
+    type: count
+    start: "{{ today_at() }}"
+    end: "{{ now() }}"
+
+utility_meter:
+  hp_daikin_heat_daily:
+    name: HP Daikin Heat Daily
+    unique_id: hp_daikin_heat_daily
+    source: sensor.bridge0_meters_energy_produced_compressor_heating
+    cycle: daily
+  hp_daikin_electricity_daily:
+    name: HP Daikin Electricity Daily
+    unique_id: hp_daikin_electricity_daily
+    source: sensor.bridge0_meters_electricity_consumed_total
+    cycle: daily
+  hp_daikin_heat_monthly:
+    name: HP Daikin Heat Monthly
+    unique_id: hp_daikin_heat_monthly
+    source: sensor.bridge0_meters_energy_produced_compressor_heating
+    cycle: monthly
+  hp_daikin_electricity_monthly:
+    name: HP Daikin Electricity Monthly
+    unique_id: hp_daikin_electricity_monthly
+    source: sensor.bridge0_meters_electricity_consumed_total
+    cycle: monthly
+  hp_heat_pump_heat_daily:
+    name: HP Heat Pump Heat Daily
+    unique_id: hp_heat_pump_heat_daily
+    source: sensor.hp_heat_energy_heat_pump
+    cycle: daily
+  hp_gas_boiler_heat_daily:
+    name: HP Gas Boiler Heat Daily
+    unique_id: hp_gas_boiler_heat_daily
+    source: sensor.hp_heat_energy_gas_boiler
+    cycle: daily
+  hp_electricity_estimate_daily:
+    name: HP Electricity Estimate Daily
+    unique_id: hp_electricity_estimate_daily
+    source: sensor.hp_electricity_estimate_total
+    cycle: daily
+  hp_compressor_starts_daily:
+    name: HP Compressor Starts Daily
+    unique_id: hp_compressor_starts_daily
+    source: sensor.bridge0_meters_starts_compressor
+    cycle: daily
+  hp_gas_boiler_starts_daily:
+    name: HP Gas Boiler Starts Daily
+    unique_id: hp_gas_boiler_starts_daily
+    source: sensor.bridge0_meters_starts_gasboiler
+    cycle: daily
+
+# -----------------------------------------------------------------------------
+# Automations
+# -----------------------------------------------------------------------------
+automation:
+  # input_number has no persistent default: without "initial" it starts at its
+  # minimum, with "initial" every restart overwrites the user's value.
+  - id: hp_initialise_settings
+    alias: "Heat Pump Monitor: initialise settings"
+    mode: single
+    triggers:
+      - trigger: homeassistant
+        event: start
+      - trigger: event
+        event_type: automation_reloaded
+    conditions:
+      - condition: state
+        entity_id: input_boolean.hp_initialised
+        state: "off"
+    actions:
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.hp_room_target
+        data:
+          value: 21
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.hp_curve_min_hours
+        data:
+          value: 12
+      - action: input_boolean.turn_on
+        target:
+          entity_id:
+            - input_boolean.hp_alerts_enabled
+            - input_boolean.hp_initialised
+
+  # Persistent notifications are raised and cleared by the same condition, so
+  # the sidebar only shows problems that are still present.
+  - id: hp_monitor_alerts
+    alias: "Heat Pump Monitor: alerts"
+    mode: queued
+    triggers:
+      - trigger: state
+        id: offline
+        entity_id: sensor.bridge0_sensors_temperature_r2t_leaving_water
+        to: unavailable
+        for: "00:15:00"
+      - trigger: state
+        id: online
+        entity_id: sensor.bridge0_sensors_temperature_r2t_leaving_water
+        from: unavailable
+      - trigger: state
+        id: error
+        entity_id:
+          - sensor.bridge0_mode_errorcode1
+          - sensor.bridge0_mode_errorcode2
+          - sensor.bridge0_mode_errorsubcode
+        to: ~
+      - trigger: state
+        id: control
+        entity_id:
+          - switch.bridge0_bridge_control_function
+          - switch.bridge0_bridge_counter_request_function
+        to: ~
+        not_to:
+          - unavailable
+          - unknown
+        for: "00:05:00"
+    actions:
+      - choose:
+          - conditions:
+              - condition: trigger
+                id: offline
+              - condition: state
+                entity_id: input_boolean.hp_alerts_enabled
+                state: "on"
+            sequence:
+              - action: persistent_notification.create
+                data:
+                  notification_id: hp_bridge_offline
+                  title: P1P2MQTT bridge offline
+                  message: >-
+                    The heat pump has not reported a leaving water temperature for
+                    15 minutes. Check the P1P2MQTT bridge and the MQTT broker.
+          - conditions:
+              - condition: trigger
+                id: online
+            sequence:
+              - action: persistent_notification.dismiss
+                data:
+                  notification_id: hp_bridge_offline
+          - conditions:
+              - condition: trigger
+                id: error
+            sequence:
+              - if:
+                  - condition: template
+                    value_template: >-
+                      {{ ['sensor.bridge0_mode_errorcode1', 'sensor.bridge0_mode_errorcode2',
+                          'sensor.bridge0_mode_errorsubcode'] | map('states')
+                         | reject('in', ['0x00', 'unknown', 'unavailable']) | list | count > 0 }}
+                  - condition: state
+                    entity_id: input_boolean.hp_alerts_enabled
+                    state: "on"
+                then:
+                  - action: persistent_notification.create
+                    data:
+                      notification_id: hp_daikin_error
+                      title: Daikin heat pump error
+                      message: >-
+                        Error codes {{ states('sensor.bridge0_mode_errorcode1') }} /
+                        {{ states('sensor.bridge0_mode_errorcode2') }}, sub code
+                        {{ states('sensor.bridge0_mode_errorsubcode') }}. Check the
+                        error on the Daikin room thermostat.
+                else:
+                  - action: persistent_notification.dismiss
+                    data:
+                      notification_id: hp_daikin_error
+          - conditions:
+              - condition: trigger
+                id: control
+            sequence:
+              - if:
+                  - condition: state
+                    entity_id:
+                      - switch.bridge0_bridge_control_function
+                      - switch.bridge0_bridge_counter_request_function
+                    state: "on"
+                then:
+                  - action: persistent_notification.dismiss
+                    data:
+                      notification_id: hp_bridge_control_off
+                else:
+                  - condition: state
+                    entity_id: input_boolean.hp_alerts_enabled
+                    state: "on"
+                  - action: persistent_notification.create
+                    data:
+                      notification_id: hp_bridge_control_off
+                      title: P1P2MQTT bridge function switched off
+                      message: >-
+                        Control_Function is {{ states('switch.bridge0_bridge_control_function') }}
+                        and Counter_Request_Function is
+                        {{ states('switch.bridge0_bridge_counter_request_function') }}.
+                        The bridge switches these off itself after too many bus errors
+                        (Error_Budget). Without them the curve settings and the Daikin
+                        counters stop updating. Switch them on again under device
+                        bridge0_Bridge.

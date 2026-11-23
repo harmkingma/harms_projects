@@ -1,0 +1,597 @@
+# Heat Pump Dashboard - complete raw configuration
+#
+# Setup: Settings -> Dashboards -> Add dashboard -> "New dashboard from scratch"
+#        name it e.g. "Heat Pump", open it -> Edit Dashboard -> 3-dot menu
+#        -> Raw configuration editor -> SELECT ALL, DELETE, paste this entire file.
+#
+# Requires packages/heatpump_monitor.yaml and the P1P2MQTT bridge "bridge0"
+# with Control_Function and Counter_Request_Function on. Built-in cards only.
+
+views:
+  # ===========================================================================
+  - title: Heat Pump
+    path: heat-pump
+    icon: mdi:heat-pump
+    cards:
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: sensor.bridge0_sensors_temperature_r2t_leaving_water
+            state: unavailable
+        card:
+          type: markdown
+          content: >
+            ## <ha-icon icon="mdi:lan-disconnect"></ha-icon> P1P2MQTT bridge offline
+
+            No data from the heat pump. Check the bridge and the MQTT broker.
+
+      - type: conditional
+        conditions:
+          - condition: or
+            conditions:
+              - condition: state
+                entity: sensor.bridge0_mode_errorcode1
+                state_not: ["0x00", "unknown", "unavailable"]
+              - condition: state
+                entity: sensor.bridge0_mode_errorcode2
+                state_not: ["0x00", "unknown", "unavailable"]
+        card:
+          type: markdown
+          content: >
+            ## <ha-icon icon="mdi:alert-octagon"></ha-icon> Daikin error
+
+            Codes {{ states('sensor.bridge0_mode_errorcode1') }} /
+            {{ states('sensor.bridge0_mode_errorcode2') }}, sub code
+            {{ states('sensor.bridge0_mode_errorsubcode') }}. Check the room thermostat.
+
+      - type: markdown
+        content: |-
+          {%- macro yn(e) -%}{{ 'on' if is_state(e, 'on') else 'off' }}{%- endmacro -%}
+          {%- set comp = is_state('binary_sensor.bridge0_mode_compressor', 'on') -%}
+          {%- set gas = is_state('binary_sensor.bridge0_mode_gasboiler_active', 'on') -%}
+          {%- set defrost = is_state('binary_sensor.bridge0_mode_defrost_active', 'on') -%}
+          ## {% if not is_state('switch.bridge0_mode_altherma_on', 'on') %}<ha-icon icon="mdi:power"></ha-icon> Space heating off
+          {%- elif defrost %}<ha-icon icon="mdi:snowflake-melt"></ha-icon> Defrosting
+          {%- elif comp and gas %}<ha-icon icon="mdi:fire"></ha-icon> Heat pump + gas boiler
+          {%- elif comp %}<ha-icon icon="mdi:heat-pump"></ha-icon> Heat pump running
+          {%- elif gas %}<ha-icon icon="mdi:fire"></ha-icon> Gas boiler running
+          {%- else %}<ha-icon icon="mdi:pause-circle-outline"></ha-icon> Standby{% endif %}
+
+          **Mode** {{ states('select.bridge0_mode_heating_cooling_auto') }} ·
+          {{ states('select.bridge0_mode_program_wd_abs') }} ·
+          {{ states('select.bridge0_fieldsettings_rt_lwt') }} control ·
+          LWT offset {{ states('sensor.bridge0_lwt_deviation_heating') }} K  
+          **Compressor** {{ states('sensor.bridge0_mode_compressor_rpm') }} Hz ·
+          **Pump** {{ yn('binary_sensor.bridge0_mode_circulation_pump') }} ·
+          **Hot water tap** {{ yn('binary_sensor.bridge0_dhw_dhw_demand') }} ·
+          **Quiet** {{ states('select.bridge0_quiet_quiet_mode') }}
+
+      - type: grid
+        columns: 3
+        square: false
+        cards:
+          - type: tile
+            entity: sensor.bridge0_sensors_temperature_room
+            name: Room
+          - type: tile
+            entity: input_number.hp_room_target
+            name: Room target
+          - type: tile
+            entity: sensor.bridge0_room_room_heating_setpoint
+            name: Thermostat setpoint
+          - type: tile
+            entity: sensor.bridge0_sensors_temperature_outside
+            name: Outside
+          - type: tile
+            entity: sensor.hp_outside_temperature_mean_12h
+            name: Outside 12 h mean
+          - type: tile
+            entity: sensor.hp_indoor_outdoor_difference
+            name: Inside − outside
+          - type: tile
+            entity: sensor.bridge0_sensors_temperature_r2t_leaving_water
+            name: Leaving water
+          - type: tile
+            entity: sensor.bridge0_lwt_lwt_setpoint
+            name: LWT setpoint
+          - type: tile
+            entity: sensor.bridge0_sensors_temperature_r4t_return_water
+            name: Return water
+          - type: tile
+            entity: sensor.hp_water_delta_t
+            name: Delta T
+          - type: tile
+            entity: sensor.bridge0_sensors_flow
+            name: Flow
+          - type: tile
+            entity: sensor.hp_cop_today
+            name: COP today
+
+      - type: horizontal-stack
+        cards:
+          - type: gauge
+            entity: sensor.hp_cop_now
+            name: COP now
+            min: 0
+            max: 7
+            needle: true
+            segments:
+              - from: 0
+                color: "#db4437"
+              - from: 2.5
+                color: "#ffa600"
+              - from: 3.5
+                color: "#43a047"
+          - type: gauge
+            entity: sensor.hp_heat_output_total
+            name: Heat output
+            unit: W
+            min: 0
+            max: 8000
+            needle: true
+          - type: gauge
+            entity: sensor.hp_electrical_power_estimate
+            name: Electrical (est.)
+            unit: W
+            min: 0
+            max: 3000
+            needle: true
+
+      - type: history-graph
+        title: Water Temperatures (24 h)
+        hours_to_show: 24
+        entities:
+          - entity: sensor.bridge0_sensors_temperature_r2t_leaving_water
+            name: Leaving water (R2T)
+          - entity: sensor.bridge0_lwt_lwt_setpoint
+            name: LWT setpoint
+          - entity: sensor.bridge0_sensors_temperature_r1t_hp2gas_water
+            name: After heat pump (R1T)
+          - entity: sensor.bridge0_sensors_temperature_r4t_return_water
+            name: Return water (R4T)
+
+      - type: history-graph
+        title: Heat and Power (24 h)
+        hours_to_show: 24
+        entities:
+          - entity: sensor.hp_heat_output_heat_pump
+            name: Heat pump heat
+          - entity: sensor.hp_heat_output_gas_boiler
+            name: Gas boiler heat
+          - entity: sensor.hp_electrical_power_estimate
+            name: Electrical (est.)
+
+      - type: history-graph
+        title: Activity (24 h)
+        hours_to_show: 24
+        entities:
+          - entity: binary_sensor.bridge0_mode_compressor
+            name: Compressor
+          - entity: binary_sensor.bridge0_mode_circulation_pump
+            name: Circulation pump
+          - entity: binary_sensor.bridge0_mode_gasboiler_active
+            name: Gas boiler
+          - entity: binary_sensor.bridge0_mode_defrost_active
+            name: Defrost
+          - entity: binary_sensor.bridge0_dhw_dhw_demand
+            name: Hot water tap
+
+      - type: entities
+        title: Today
+        show_header_toggle: false
+        entities:
+          - entity: sensor.hp_compressor_runtime_today
+            name: Compressor runtime
+          - entity: sensor.hp_compressor_starts_daily
+            name: Compressor starts
+          - entity: sensor.hp_average_compressor_run_today
+            name: Average run length
+          - entity: sensor.hp_defrosts_today
+            name: Defrosts
+          - entity: sensor.hp_gas_boiler_runtime_today
+            name: Gas boiler runtime
+          - entity: sensor.hp_gas_boiler_starts_daily
+            name: Gas boiler starts (incl. hot water)
+
+  # ===========================================================================
+  - title: Weather Curve
+    path: weather-curve
+    icon: mdi:chart-line
+    cards:
+      - type: markdown
+        title: Weather-Dependent Curve (main zone, heating)
+        content: |-
+          {%- set c = 'sensor.hp_curve_lwt' -%}
+          {%- set lo = state_attr(c, 'low_ambient') -%}
+          {%- set hi = state_attr(c, 'high_ambient') -%}
+          {%- set llo = state_attr(c, 'lwt_at_low_ambient') -%}
+          {%- set lhi = state_attr(c, 'lwt_at_high_ambient') -%}
+          {%- if lo is number and hi is number and llo is number and lhi is number and hi > lo -%}
+          {%- macro lwt(t) -%}{%- set tt = [[t, lo] | max, hi] | min -%}{{ (lhi + (llo - lhi) * (hi - tt) / (hi - lo)) | round(1) }}{%- endmacro -%}
+          | Setting | | Value |
+          |---|---|---:|
+          | [1-00] | Low ambient temperature | {{ lo | int }} °C |
+          | [1-02] | LWT at low ambient | {{ llo | int }} °C |
+          | [1-01] | High ambient temperature | {{ hi | int }} °C |
+          | [1-03] | LWT at high ambient | {{ lhi | int }} °C |
+          | [1-0A] | Outside averaging | {{ {'0': 'none', '1': '12 h', '2': '24 h', '3': '48 h', '4': '72 h'}.get(states('sensor.bridge0_fieldsettings_1_0a_a64_averaging_time'), states('sensor.bridge0_fieldsettings_1_0a_a64_averaging_time')) }} |
+
+          | Outside | {% for t in [-15, -10, -5, 0, 5, 10, 15] %}{{ t }} °C | {% endfor %}
+          |---|{% for t in range(7) %}---:|{% endfor %}
+          | LWT | {% for t in [-15, -10, -5, 0, 5, 10, 15] %}{{ lwt(t) }} | {% endfor %}
+
+          **Now:** outside {{ states('sensor.bridge0_sensors_temperature_outside') | float(0) | round(1) }} °C,
+          12 h mean {{ states('sensor.hp_outside_temperature_mean_12h') | float(0) | round(1) }} °C →
+          curve {{ states(c) }} °C. Daikin setpoint {{ states('sensor.bridge0_lwt_lwt_setpoint') }} °C
+          (offset {{ states('sensor.bridge0_lwt_deviation_heating') }} K).
+          {%- else %}
+          *Curve settings not available. Switch on Control_Function in device bridge0_Bridge.*
+          {%- endif %}
+
+      - type: markdown
+        title: Room vs Outside (learned) and Suggestion
+        content: |-
+          {%- set s = 'sensor.hp_curve_suggestion' -%}
+          {%- set rows = state_attr(s, 'rows') or [] -%}
+          {%- set target = states('input_number.hp_room_target') | float(21) -%}
+          Target room temperature **{{ target }} °C**. Learning since
+          {{ as_timestamp(state_attr('sensor.hp_curve_learning', 'since'), 0) | timestamp_custom('%d %b %H:%M') }},
+          {{ states('sensor.hp_curve_learning') }} h of data. Last: *{{ state_attr('sensor.hp_curve_learning', 'last_event') or '–' }}*
+
+          {% if rows | count > 0 -%}
+          | Outside (12 h) | Hours | Room | Deviation | Curve LWT | LWT change |
+          |---|---:|---:|---:|---:|---:|
+          {% for r in rows -%}
+          | {{ r.bin }} … {{ r.bin + 2 }} °C | {{ r.hours }} | {{ r.room | round(1) }} °C | {{ '%+.1f' | format(r.deviation) }} K | {{ r.curve_lwt }} °C | {{ ('%+.1f K' | format(r.correction + 0)) if r.correction is number else '…' }} |
+          {% endfor %}
+          {%- else -%}
+          *No samples yet. Samples are taken every 10 minutes while heating in WD mode without LWT offset.*
+          {%- endif %}
+
+          {% set st = states(s) -%}
+          ### {% if st == 'Curve OK' %}<ha-icon icon="mdi:check-circle"></ha-icon>{% elif st == 'Collecting data' %}<ha-icon icon="mdi:timer-sand"></ha-icon>{% else %}<ha-icon icon="mdi:tune-variant"></ha-icon>{% endif %} {{ st }}
+          {% if st not in ['Curve OK', 'Collecting data', 'Curve settings unavailable', 'unknown', 'unavailable'] -%}
+          Set **[1-02]** {{ state_attr('sensor.hp_curve_lwt', 'lwt_at_low_ambient') | int(0) }} → **{{ state_attr(s, 'suggested_lwt_at_low_ambient') }} °C**
+          and **[1-03]** {{ state_attr('sensor.hp_curve_lwt', 'lwt_at_high_ambient') | int(0) }} → **{{ state_attr(s, 'suggested_lwt_at_high_ambient') }} °C**
+          (mean room deviation {{ '%+.1f' | format(state_attr(s, 'mean_room_deviation') | float(0)) }} K over {{ state_attr(s, 'hours_used') }} h).
+
+          Change one step at a time and give the floor at least 2–3 days before judging
+          the result; learning restarts automatically when the curve changes.
+          {%- elif st == 'Collecting data' -%}
+          A bin needs {{ states('input_number.hp_curve_min_hours') | int }} h of data before it counts.
+          {%- endif %}
+
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: sensor.hp_curve_learning
+            attribute: previous_curve
+            state_not: ""
+        card:
+          type: markdown
+          title: Previous Curve (before the last change)
+          content: |-
+            {%- set p = state_attr('sensor.hp_curve_learning', 'previous_bins') or [] -%}
+            Curve [1-00]/[1-01]/[1-02]/[1-03]: **{{ state_attr('sensor.hp_curve_learning', 'previous_curve') }}**
+            (now {{ state_attr('sensor.hp_curve_learning', 'curve') }}).
+
+            | Outside (12 h) | Hours | Room |
+            |---|---:|---:|
+            {% for b in p -%}
+            | {{ b[0] }} … {{ b[0] + 2 }} °C | {{ (b[1] / 6) | round(1) }} | {{ b[3] | round(1) }} °C |
+            {% endfor %}
+
+      - type: history-graph
+        title: Room vs Outside (3 days)
+        hours_to_show: 72
+        entities:
+          - entity: sensor.bridge0_sensors_temperature_room
+            name: Room
+          - entity: input_number.hp_room_target
+            name: Target
+          - entity: sensor.bridge0_sensors_temperature_outside
+            name: Outside
+          - entity: sensor.hp_outside_temperature_mean_12h
+            name: Outside 12 h mean
+
+      - type: history-graph
+        title: LWT Setpoint vs Curve (3 days)
+        hours_to_show: 72
+        entities:
+          - entity: sensor.bridge0_lwt_lwt_setpoint
+            name: Daikin LWT setpoint
+          - entity: sensor.hp_curve_lwt
+            name: Curve at 12 h mean
+          - entity: sensor.bridge0_sensors_temperature_r2t_leaving_water
+            name: Leaving water
+
+      - type: statistics-graph
+        title: Daily Mean Room and Outside (30 days)
+        entities:
+          - entity: sensor.bridge0_sensors_temperature_room
+            name: Room
+          - entity: sensor.bridge0_sensors_temperature_outside
+            name: Outside
+        stat_types:
+          - mean
+        period: day
+        days_to_show: 30
+        chart_type: line
+
+      - type: statistics-graph
+        title: Daily Room Deviation from Target (30 days)
+        entities:
+          - entity: sensor.hp_room_deviation
+            name: Deviation
+        stat_types:
+          - mean
+          - min
+          - max
+        period: day
+        days_to_show: 30
+        chart_type: line
+
+      - type: entities
+        title: Curve Tuning Settings
+        show_header_toggle: false
+        entities:
+          - entity: input_number.hp_room_target
+            name: Room target temperature
+          - entity: input_number.hp_curve_min_hours
+            name: Min. hours per bin
+          - entity: sensor.hp_heat_loss_coefficient
+            name: Heat loss (24 h)
+          - entity: script.hp_curve_reset
+            name: Reset learning
+            action_name: Reset
+
+  # ===========================================================================
+  - title: Energy & COP
+    path: energy-cop
+    icon: mdi:lightning-bolt-circle
+    cards:
+      - type: grid
+        columns: 3
+        square: false
+        cards:
+          - type: tile
+            entity: sensor.hp_cop_today
+            name: COP today
+          - type: tile
+            entity: sensor.hp_cop_yesterday
+            name: COP yesterday
+          - type: tile
+            entity: sensor.hp_cop_this_month
+            name: COP this month
+          - type: tile
+            entity: sensor.hp_cop_today_estimate
+            name: COP today (live est.)
+          - type: tile
+            entity: sensor.hp_cop_lifetime
+            name: COP lifetime
+          - type: tile
+            entity: sensor.bridge0_cop_cop_after_bridge
+            name: COP since bridge
+
+      - type: entities
+        title: Energy Today
+        show_header_toggle: false
+        entities:
+          - type: section
+            label: Daikin counters (whole kWh)
+          - entity: sensor.hp_daikin_heat_daily
+            name: Heat produced
+          - entity: sensor.hp_daikin_electricity_daily
+            name: Electricity used
+          - type: section
+            label: Live estimates (flow × ΔT, inverter current)
+          - entity: sensor.hp_heat_pump_heat_daily
+            name: Heat pump heat
+          - entity: sensor.hp_gas_boiler_heat_daily
+            name: Gas boiler heat (space heating)
+          - entity: sensor.hp_electricity_estimate_daily
+            name: Electricity
+
+      - type: statistics-graph
+        title: Daily Heat and Electricity (30 days)
+        entities:
+          - entity: sensor.bridge0_meters_energy_produced_compressor_heating
+            name: Heat produced
+          - entity: sensor.bridge0_meters_electricity_consumed_total
+            name: Electricity used
+        stat_types:
+          - change
+        period: day
+        days_to_show: 30
+        chart_type: bar
+
+      - type: statistics-graph
+        title: Running COP vs Outside (daily mean)
+        entities:
+          - entity: sensor.hp_cop_now
+            name: COP while running
+          - entity: sensor.bridge0_sensors_temperature_outside
+            name: Outside
+        stat_types:
+          - mean
+        period: day
+        days_to_show: 30
+        chart_type: line
+
+      - type: statistics-graph
+        title: Compressor Starts per Day
+        entities:
+          - entity: sensor.hp_compressor_starts_daily
+            name: Starts
+        stat_types:
+          - change
+        period: day
+        days_to_show: 30
+        chart_type: bar
+
+      - type: statistics-graph
+        title: Heat Loss Coefficient (daily mean)
+        entities:
+          - entity: sensor.hp_heat_loss_coefficient
+            name: W/K
+        stat_types:
+          - mean
+        period: day
+        days_to_show: 30
+        chart_type: line
+
+  # ===========================================================================
+  - title: Refrigerant & Compressor
+    path: refrigerant
+    icon: mdi:snowflake-thermometer
+    cards:
+      - type: history-graph
+        title: Refrigerant Temperatures (24 h)
+        hours_to_show: 24
+        entities:
+          - entity: sensor.bridge0_sensors_temperature_refrigerant_discharge
+            name: Discharge
+          - entity: sensor.bridge0_sensors_temperature_r3t_refrigerant
+            name: Liquid (R3T)
+          - entity: sensor.bridge0_sensors_temperature_refrigerant_q_param15
+            name: Refrigerant (param 15)
+          - entity: sensor.bridge0_sensors_temperature_refrigerant_2
+            name: Outdoor coil
+          - entity: sensor.bridge0_sensors_temperature_outside_unit
+            name: Outdoor unit air
+
+      - type: history-graph
+        title: Compressor and Fan (24 h)
+        hours_to_show: 24
+        entities:
+          - entity: sensor.bridge0_mode_compressor_rpm
+            name: Compressor
+          - entity: sensor.bridge0_mode_fan_rpm
+            name: Fan
+          - entity: sensor.bridge0_power_inverter_primary_current
+            name: Inverter current
+
+      - type: history-graph
+        title: Heat Pump vs Distributor Pipes (24 h)
+        hours_to_show: 24
+        entities:
+          - entity: sensor.bridge0_sensors_temperature_r2t_leaving_water
+            name: Heat pump leaving (R2T)
+          - entity: sensor.floor_heating_supply_temperature
+            name: Distributor supply pipe
+          - entity: sensor.bridge0_sensors_temperature_r4t_return_water
+            name: Heat pump return (R4T)
+          - entity: sensor.floor_heating_return_temperature
+            name: Distributor return pipe
+
+      - type: entities
+        title: Lifetime Counters
+        show_header_toggle: false
+        entities:
+          - entity: sensor.bridge0_meters_energy_produced_compressor_heating
+            name: Heat produced
+          - entity: sensor.bridge0_meters_electricity_consumed_total
+            name: Electricity used
+          - entity: sensor.bridge0_meters_hours_compressor_heating
+            name: Compressor hours
+          - entity: sensor.bridge0_meters_starts_compressor
+            name: Compressor starts
+          - entity: sensor.bridge0_meters_hours_circulation_pump
+            name: Circulation pump hours
+          - entity: sensor.bridge0_meters_hours_gasboiler_heating
+            name: Gas boiler hours (heating)
+          - entity: sensor.bridge0_meters_hours_gasboiler_dhw
+            name: Gas boiler hours (hot water)
+          - entity: sensor.bridge0_meters_starts_gasboiler
+            name: Gas boiler starts
+
+      - type: markdown
+        title: Key Field Settings
+        content: |-
+          {%- macro fs(id) -%}{{ states('sensor.bridge0_fieldsettings_' ~ id) }}{%- endmacro -%}
+          | Setting | Meaning | Value |
+          |---|---|---:|
+          | [5-00] / [5-01] | Equilibrium: below this outside temp only the gas boiler heats | {{ 'on' if fs('5_00_equilibrium_enabled') == '1' else 'off' }} / {{ fs('5_01_a522_equilibrium_temp') }} °C |
+          | [7-04] | Hybrid savings mode | {{ 'ecological' if fs('7_04_a67_savings_mode_ecological') == '1' else 'economical' }} |
+          | [7-03] | Primary energy factor (ecological choice gas vs heat pump) | {{ fs('7_03_pe_factor') }} |
+          | [9-09] | Target delta T | {{ fs('9_09_delta_t') }} K |
+          | [8-0B] | Target flow heat pump | {{ fs('8_0b_flow_target_heatpump') }} l/min |
+          | [9-0D] | Pump speed limitation | {{ fs('9_0d_pump_speed_limitation') }} |
+          | [8-06] / RT modulation | LWT modulation by room thermostat | {{ states('select.bridge0_fieldsettings_rt_modulation') }} (max {{ fs('8_06_lwt_modulation_max') }} K) |
+          | [9-0C] | Room temperature hysteresis | {{ fs('9_0c_room_temperature_hysteresis') }} K |
+          | [9-04] | LWT overshoot | {{ states('number.bridge0_fieldsettings_overshoot') }} K |
+          | [9-0B] | Emitter type | {{ 'slow (floor)' if fs('9_0b_a3117_emitter_slow') == '1' else 'quick' }} |
+
+  # ===========================================================================
+  - title: Controls & Bridge
+    path: controls
+    icon: mdi:tune
+    cards:
+      - type: markdown
+        content: >
+          <ha-icon icon="mdi:alert"></ha-icon> These controls write to the Daikin through
+          the P1P2MQTT bridge. Each change uses one unit of the bridge's Write Budget.
+          Field settings (the curve) can only be changed on the Daikin interface.
+
+      - type: tile
+        entity: switch.bridge0_mode_altherma_on
+        name: Space heating on/off
+        vertical: false
+        features:
+          - type: toggle
+
+      - type: tile
+        entity: climate.bridge0_lwt_deviation_heating
+        name: LWT offset (shifts the WD curve, −10 … +10 K)
+        features:
+          - type: target-temperature
+
+      - type: tile
+        entity: climate.bridge0_room_room_heating
+        name: Room thermostat setpoint
+        features:
+          - type: target-temperature
+
+      - type: entities
+        title: Modes
+        show_header_toggle: false
+        entities:
+          - entity: select.bridge0_mode_program_wd_abs
+            name: Weather-dependent / absolute
+          - entity: select.bridge0_mode_heating_cooling_auto
+            name: Heating / cooling
+          - entity: select.bridge0_quiet_quiet_mode
+            name: Quiet mode
+          - entity: select.bridge0_quiet_quiet_level
+            name: Quiet level
+          - entity: button.bridge0_mode_daikin_defrost_request
+            name: Request defrost
+
+      - type: entities
+        title: P1P2MQTT Bridge
+        show_header_toggle: false
+        entities:
+          - entity: switch.bridge0_bridge_control_function
+            name: Control function
+          - entity: switch.bridge0_bridge_counter_request_function
+            name: Counter request function
+          - entity: sensor.bridge0_bridge_error_budget
+            name: Error budget
+          - entity: number.bridge0_bridge_write_budget
+            name: Write budget
+          - entity: sensor.bridge0_bridge_writes_refused_budget
+            name: Writes refused (budget)
+          - entity: sensor.bridge0_bridge_writes_refused_busy
+            name: Writes refused (busy)
+          - entity: binary_sensor.bridge0_bridge_esp_throttling
+            name: ESP throttling
+          - entity: sensor.bridge0_bridge_wifi_rssi
+            name: WiFi RSSI
+          - entity: sensor.bridge0_bridge_v_interface
+            name: P1/P2 voltage
+          - entity: switch.bridge0_setup_ha_setup
+            name: HA setup mode
+          - entity: binary_sensor.bridge0_bridge_esp_eeprom_saved
+            name: Settings saved
+          - entity: input_boolean.hp_alerts_enabled
+            name: Monitor alerts
