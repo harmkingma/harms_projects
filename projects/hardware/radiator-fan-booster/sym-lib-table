@@ -1,0 +1,4 @@
+(sym_lib_table
+	(version 7)
+	(lib (name "radiator_fan_booster")(type "KiCad")(uri "${KIPRJMOD}/radiator_fan_booster.kicad_sym")(options "")(descr "Radiator fan booster project symbols"))
+)

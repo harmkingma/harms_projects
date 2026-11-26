@@ -15,6 +15,7 @@ Open [harms_projects.code-workspace](harms_projects.code-workspace) in VS Code.
 | Daikin Altherma hybrid heat pump monitor via P1P2MQTT (package, dashboard, curve tuning, entity inventory) | [projects/home-assistant/heatpump_monitor](projects/home-assistant/heatpump_monitor) |
 | Camera holder and presence box CAD/STL/STEP | [projects/hardware/espcam-water](projects/hardware/espcam-water) |
 | Dual-temperature enclosure, print files and board reference | [projects/hardware/floorheating-temp-monitor](projects/hardware/floorheating-temp-monitor) |
+| Radiator fan booster (kitchen utility room) – design, parametric FreeCAD parts, KiCad schematic, parts list, control concept | [projects/hardware/radiator-fan-booster](projects/hardware/radiator-fan-booster) |
 | Future schematic/PCB designs | [projects/electronics](projects/electronics) |
 | Reusable libraries/packages | [libraries](libraries) |
 

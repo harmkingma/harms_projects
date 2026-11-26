@@ -29,5 +29,7 @@ projects/hardware/espcam-water/presence_wiring.net.xml
 projects/hardware/espcam-water/presence_wiring.pdf
 projects/hardware/espcam-water/wiring_preview/
 projects/hardware/floorheating-temp-monitor/print/
+projects/hardware/radiator-fan-booster/radiator_fan_booster_schematic.pdf
+**/*.kicad_prl
 projects/esphome/floorheating-temp-monitor/wiring_diagram.png
 !projects/hardware/floorheating-temp-monitor/reference/5483_Feather_ESP32-S3_TFT.step
