@@ -376,7 +376,7 @@ Load balancing works through the charger's pilot signal, independent of that set
 
 - the Alfen does not report `Load Balancing Limited` or `Load Balancing Forced Off`;
 - `sensor.ev_current_headroom` (room on the tightest phase: main fuse − P1 phase power ÷ 230 V + the car's own current) is at least the charger maximum;
-- the SOC is more than 3 points below the car's charge limit, which excludes the normal taper at the end of a charge.
+- the SOC is more than 3 points below the car's charge limit **and** below 90 %, which excludes the normal taper at the end of a charge. The car tapers above about 90 % whatever the limit: a charge to 100 % on 23 Nov 2026 tapered from 91 % (16 A down to 11 A) and triggered a needless amps nudge at 96 %.
 
 Every action creates a persistent notification (**EV charge watchdog**), adds a logbook entry and increases `counter.ev_watchdog_corrections`. **Last Correction** and the escalation step for the current session are on the dashboard. Each action costs one Fleet command, and the shortfall steps one data request.
 

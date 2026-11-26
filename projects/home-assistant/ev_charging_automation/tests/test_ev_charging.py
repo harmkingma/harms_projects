@@ -248,6 +248,19 @@ async def test_watchdog_ignores_shortfall_when_fuse_is_full(hass: HomeAssistant,
     assert home.calls == []
 
 
+async def test_watchdog_ignores_taper_on_charge_to_full(hass: HomeAssistant, home: Home) -> None:
+    # 23 Nov 2026: charging to 100 %, the car tapered from 91 % to 11 A.
+    await start_running_night_session(hass, home, 16)
+    await home.set_helper("input_number.ev_night_target_soc", 100)
+    home.set(LIMIT, 100)
+    home.set(SOC, 92)
+    home.charging(11)
+    await home.advance(30 * 60)
+
+    assert state(hass, "binary_sensor.ev_current_shortfall") == "off"
+    assert home.calls == []
+
+
 async def test_consumption_learned_from_drives_replaces_manual_value(hass: HomeAssistant, home: Home) -> None:
     async def poll(odo: float, soc: int, kwh: float) -> None:
         home.set(ODO, odo, unit_of_measurement="km")

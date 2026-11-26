@@ -880,7 +880,9 @@ template:
 
       # A max-power session draws clearly less than the charger maximum for 15
       # minutes, and neither load balancing, the main fuse nor the end-of-charge
-      # taper near the limit explains it.
+      # taper explains it. The car tapers near its limit, and above about 90 %
+      # SOC whatever the limit: a charge to 100 % on 23 Nov 2026 tapered from
+      # 91 % (16 A down to 11 A).
       - name: EV Current Shortfall
         unique_id: ev_current_shortfall
         icon: mdi:current-ac
@@ -888,6 +890,8 @@ template:
           minutes: 15
         state: >
           {% set station = states('number.ev_charger_max_station_current') | float(16) %}
+          {% set limit = states('number.life_the_universe_and_everything_charge_limit') | float(0) %}
+          {% set taper_from = [limit - 3, 90] | min %}
           {{ is_state('binary_sensor.ev_charging_active', 'on')
              and (is_state('input_boolean.ev_night_session', 'on')
                   or is_state('input_boolean.ev_safety_session', 'on')
@@ -897,8 +901,7 @@ template:
                  not in ['Load Balancing Limited', 'Load Balancing Forced Off']
              and states('sensor.ev_current_headroom') | float(0) >= station
              and states('sensor.ev_charging_current') | float(station) < station - 3
-             and states('sensor.ev_soc_effective') | float(100)
-                 < states('number.life_the_universe_and_everything_charge_limit') | float(0) - 3 }}
+             and states('sensor.ev_soc_effective') | float(100) < taper_from }}
 
 # -----------------------------------------------------------------------------
 # Scripts (dashboard buttons)
